@@ -106,6 +106,16 @@ func TestSuggestedFixesRecursive(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixrecursive")
 }
 
+func TestSuggestedFixesTestCall(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixtestcall")
+}
+
 func TestIgnoreTestFilesToggle(t *testing.T) {
 	// analysistest.Run loads the library package only (no *_test.go),
 	// so filename filtering is asserted through the config knob.

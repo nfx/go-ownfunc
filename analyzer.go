@@ -36,6 +36,7 @@ type candidate struct {
 	unfixable       bool
 	sites           []callSite
 	recursiveIdents []*ast.Ident
+	testCallIdents  []*ast.Ident
 }
 
 // NewAnalyzer constructs the ownfunc analyzer with the given configuration.
@@ -202,7 +203,12 @@ func (cfg *Config) inspectCallExpr(
 	if !ok {
 		return true
 	}
+	// a test-file call is not evidence for or against ownership (it's excluded
+	// from disqualify/calls accounting below), but it still calls the bare
+	// identifier directly, which breaks once decl becomes a method; record it
+	// so suggestedFix can synthesize a receiver for it.
 	if cfg.ignoreFile(pass, node.Pos()) {
+		cand.testCallIdents = append(cand.testCallIdents, ident)
 		return true
 	}
 	var caller *ast.FuncDecl
@@ -267,8 +273,10 @@ func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
 
 // suggestedFix builds the edits that turn decl into a method of owner: add the
 // receiver clause and qualify every recorded call site, including recursive
-// self-calls, which take the new method's own receiver name. The receiver is
-// a pointer unless owner's existing methods are exclusively value-receiver.
+// self-calls, which take the new method's own receiver name, and dangling
+// test-file calls, which get a freshly literal owner instance since no
+// receiver is in scope there. The receiver is a pointer unless owner's
+// existing methods are exclusively value-receiver.
 func (cand *candidate) suggestedFix() analysis.SuggestedFix {
 	star := ""
 	if cand.ownerUsesPointerReceiver() {
@@ -292,6 +300,18 @@ func (cand *candidate) suggestedFix() analysis.SuggestedFix {
 			Pos:     ident.Pos(),
 			End:     ident.Pos(),
 			NewText: []byte(recv + "."),
+		})
+	}
+	amp := ""
+	if star == "*" {
+		amp = "&"
+	}
+	testRecv := fmt.Sprintf("(%s%s{})", amp, cand.owner.Obj().Name())
+	for _, ident := range cand.testCallIdents {
+		edits = append(edits, analysis.TextEdit{
+			Pos:     ident.Pos(),
+			End:     ident.Pos(),
+			NewText: []byte(testRecv + "."),
 		})
 	}
 	slices.SortFunc(edits, func(left, right analysis.TextEdit) int {
