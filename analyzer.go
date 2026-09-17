@@ -28,13 +28,14 @@ type callSite struct {
 }
 
 type candidate struct {
-	decl       *ast.FuncDecl
-	obj        *types.Func
-	owner      *types.Named
-	calls      int
-	disqualify bool
-	unfixable  bool
-	sites      []callSite
+	decl            *ast.FuncDecl
+	obj             *types.Func
+	owner           *types.Named
+	calls           int
+	disqualify      bool
+	unfixable       bool
+	sites           []callSite
+	recursiveIdents []*ast.Ident
 }
 
 // NewAnalyzer constructs the ownfunc analyzer with the given configuration.
@@ -189,7 +190,7 @@ func (cfg *Config) inspectCallExpr(
 	enclosing []*ast.FuncDecl,
 	candidates map[*types.Func]*candidate,
 ) bool {
-	ident := extractCalleeIdent(node.Fun)
+	ident := cfg.extractCalleeIdent(node.Fun)
 	if ident == nil {
 		return true
 	}
@@ -208,9 +209,24 @@ func (cfg *Config) inspectCallExpr(
 	if len(enclosing) > 0 {
 		caller = enclosing[len(enclosing)-1]
 	}
+	// a recursive self-call says nothing about which type's methods use cand,
+	// so it must not disqualify or count towards it; it still needs qualifying
+	// once cand becomes a method, so record it separately for the fix.
+	if caller == cand.decl {
+		cand.recursiveIdents = append(cand.recursiveIdents, ident)
+		return true
+	}
+	cfg.recordCallSite(pass, caller, ident, cand)
+	return true
+}
+
+// recordCallSite updates cand with a genuine, non-recursive call from caller:
+// tracking the owner type, the call count, and the rewrite site for the
+// suggested fix.
+func (cfg *Config) recordCallSite(pass *analysis.Pass, caller *ast.FuncDecl, ident *ast.Ident, cand *candidate) {
 	owner, done := cfg.qualifiedOwner(pass, caller, cand)
 	if done {
-		return true
+		return
 	}
 	if cand.owner == nil {
 		cand.owner = owner
@@ -224,7 +240,6 @@ func (cfg *Config) inspectCallExpr(
 	} else {
 		cand.sites = append(cand.sites, callSite{ident: ident, receiver: recv})
 	}
-	return true
 }
 
 func (cfg *Config) qualifiedOwner(pass *analysis.Pass,
@@ -251,23 +266,32 @@ func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
 }
 
 // suggestedFix builds the edits that turn decl into a method of owner: add the
-// receiver clause and qualify every recorded call site. The receiver is a
-// pointer unless owner's existing methods are exclusively value-receiver.
+// receiver clause and qualify every recorded call site, including recursive
+// self-calls, which take the new method's own receiver name. The receiver is
+// a pointer unless owner's existing methods are exclusively value-receiver.
 func (cand *candidate) suggestedFix() analysis.SuggestedFix {
 	star := ""
 	if cand.ownerUsesPointerReceiver() {
 		star = "*"
 	}
+	recv := cand.sites[0].receiver
 	edits := []analysis.TextEdit{{
 		Pos:     cand.decl.Name.Pos(),
 		End:     cand.decl.Name.Pos(),
-		NewText: fmt.Appendf(nil, "(%s %s%s) ", cand.sites[0].receiver, star, cand.owner.Obj().Name()),
+		NewText: fmt.Appendf(nil, "(%s %s%s) ", recv, star, cand.owner.Obj().Name()),
 	}}
 	for _, site := range cand.sites {
 		edits = append(edits, analysis.TextEdit{
 			Pos:     site.ident.Pos(),
 			End:     site.ident.Pos(),
 			NewText: []byte(site.receiver + "."),
+		})
+	}
+	for _, ident := range cand.recursiveIdents {
+		edits = append(edits, analysis.TextEdit{
+			Pos:     ident.Pos(),
+			End:     ident.Pos(),
+			NewText: []byte(recv + "."),
 		})
 	}
 	slices.SortFunc(edits, func(left, right analysis.TextEdit) int {
@@ -300,12 +324,12 @@ func (cand *candidate) ownerUsesPointerReceiver() bool {
 	return hasPointer || !hasValue
 }
 
-func extractCalleeIdent(expr ast.Expr) *ast.Ident {
+func (cfg *Config) extractCalleeIdent(expr ast.Expr) *ast.Ident {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		return e
 	case *ast.ParenExpr:
-		return extractCalleeIdent(e.X)
+		return cfg.extractCalleeIdent(e.X)
 	default:
 		return nil
 	}
@@ -337,7 +361,7 @@ func (cfg *Config) isDirectCallee(ident *ast.Ident, stack []ast.Node) bool {
 		case *ast.ParenExpr:
 			continue
 		case *ast.CallExpr:
-			return extractCalleeIdent(n.Fun) == ident
+			return cfg.extractCalleeIdent(n.Fun) == ident
 		default:
 			return false
 		}
