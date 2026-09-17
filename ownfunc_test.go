@@ -66,6 +66,36 @@ func TestSuggestedFixes(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fix")
 }
 
+func TestSuggestedFixesValueReceiver(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixvalue")
+}
+
+func TestSuggestedFixesPointerReceiver(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixpointer")
+}
+
+func TestSuggestedFixesMixedReceiver(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixmixed")
+}
+
 func TestIgnoreTestFilesToggle(t *testing.T) {
 	// analysistest.Run loads the library package only (no *_test.go),
 	// so filename filtering is asserted through the config knob.

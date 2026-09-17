@@ -250,13 +250,18 @@ func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
 	return name
 }
 
-// suggestedFix builds the edits that turn decl into a pointer-receiver method
-// of owner: add the receiver clause and qualify every recorded call site.
+// suggestedFix builds the edits that turn decl into a method of owner: add the
+// receiver clause and qualify every recorded call site. The receiver is a
+// pointer unless owner's existing methods are exclusively value-receiver.
 func (cand *candidate) suggestedFix() analysis.SuggestedFix {
+	star := ""
+	if cand.ownerUsesPointerReceiver() {
+		star = "*"
+	}
 	edits := []analysis.TextEdit{{
 		Pos:     cand.decl.Name.Pos(),
 		End:     cand.decl.Name.Pos(),
-		NewText: fmt.Appendf(nil, "(%s *%s) ", cand.sites[0].receiver, cand.owner.Obj().Name()),
+		NewText: fmt.Appendf(nil, "(%s %s%s) ", cand.sites[0].receiver, star, cand.owner.Obj().Name()),
 	}}
 	for _, site := range cand.sites {
 		edits = append(edits, analysis.TextEdit{
@@ -269,9 +274,30 @@ func (cand *candidate) suggestedFix() analysis.SuggestedFix {
 		return cmp.Compare(left.Pos, right.Pos)
 	})
 	return analysis.SuggestedFix{
-		Message:   fmt.Sprintf("Convert %s to a method of *%s", cand.obj.Name(), cand.owner.Obj().Name()),
+		Message:   fmt.Sprintf("Convert %s to a method of %s%s", cand.obj.Name(), star, cand.owner.Obj().Name()),
 		TextEdits: edits,
 	}
+}
+
+// ownerUsesPointerReceiver reports whether owner's methods should get a
+// pointer receiver: true when any existing method already uses one, or when
+// owner has no methods yet; false only when every existing method is
+// value-receiver.
+func (cand *candidate) ownerUsesPointerReceiver() bool {
+	hasPointer := false
+	hasValue := false
+	for i := range cand.owner.NumMethods() {
+		recv := cand.owner.Method(i).Signature().Recv()
+		if recv == nil {
+			continue
+		}
+		if _, ok := recv.Type().(*types.Pointer); ok {
+			hasPointer = true
+		} else {
+			hasValue = true
+		}
+	}
+	return hasPointer || !hasValue
 }
 
 func extractCalleeIdent(expr ast.Expr) *ast.Ident {

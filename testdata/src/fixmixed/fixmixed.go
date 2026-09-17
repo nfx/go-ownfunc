@@ -1,0 +1,19 @@
+package fixmixed
+
+type Registry struct {
+	names map[int]string
+}
+
+// lookup is called from both a pointer-receiver and a value-receiver method of
+// Registry, so the fix must prefer the pointer receiver.
+func lookup(names map[int]string, id int) string { // want "lookup is called only from methods of \\*Registry; consider making it an unexported method"
+	return names[id]
+}
+
+func (r *Registry) Name(id int) string {
+	return lookup(r.names, id)
+}
+
+func (r Registry) NameCopy(id int) string {
+	return lookup(r.names, id)
+}

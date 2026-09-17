@@ -1,0 +1,19 @@
+package fixpointer
+
+type Store struct {
+	items []string
+}
+
+// appended is only ever called from pointer-receiver methods of Store, so the
+// fix must attach it as a pointer-receiver method.
+func appended(items []string, v string) []string { // want "appended is called only from methods of \\*Store; consider making it an unexported method"
+	return append(items, v)
+}
+
+func (s *Store) Add(v string) {
+	s.items = appended(s.items, v)
+}
+
+func (s *Store) AddTwice(v string) {
+	s.items = appended(s.items, v)
+}
