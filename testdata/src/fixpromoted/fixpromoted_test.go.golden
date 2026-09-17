@@ -1,0 +1,7 @@
+package fixpromoted
+
+import "testing"
+
+func TestNewRuntime(t *testing.T) {
+	(&Some{value: "x"}).newRuntime(t.Context())
+}

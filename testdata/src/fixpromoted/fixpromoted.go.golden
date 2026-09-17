@@ -1,0 +1,21 @@
+package fixpromoted
+
+import "context"
+
+type Some struct {
+	value string
+}
+
+// newRuntime already takes Some explicitly as an argument, so the fix should
+// promote that parameter into the receiver instead of synthesizing one.
+func (s *Some) newRuntime(ctx context.Context) string { // want "newRuntime is called only from methods of \\*Some; consider making it an unexported method"
+	return s.value
+}
+
+func (s *Some) Build(ctx context.Context) string {
+	return s.newRuntime(ctx)
+}
+
+func (s *Some) Rebuild(ctx context.Context) string {
+	return s.newRuntime(ctx)
+}
