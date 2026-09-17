@@ -1,0 +1,35 @@
+package fixnonstruct
+
+type Mode uint32
+
+// parseMode is called by Mode's pointer-receiver methods and also directly
+// from a test; Mode's underlying type is not a struct, so "&Mode{}" is not
+// valid Go and the synthesized instance must use new(Mode) instead.
+func (m *Mode) parseMode(input string) Mode { // want "parseMode is called only from methods of \\*Mode; consider making it an unexported method"
+	return Mode(len(input))
+}
+
+func (m *Mode) Parse(input string) {
+	*m = m.parseMode(input)
+}
+
+func (m *Mode) Reparse(input string) {
+	*m = m.parseMode(input)
+}
+
+type Flag uint8
+
+// describeFlag is called by Flag's value-receiver methods and also directly
+// from a test; a synthesized instance must dereference new(Flag) since
+// "Flag{}" is not valid for a non-struct type either.
+func (f Flag) describeFlag(input string) Flag { // want "describeFlag is called only from methods of \\*Flag; consider making it an unexported method"
+	return Flag(len(input))
+}
+
+func (f Flag) Describe(input string) Flag {
+	return f.describeFlag(input)
+}
+
+func (f Flag) Redescribe(input string) Flag {
+	return f.describeFlag(input)
+}

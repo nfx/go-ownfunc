@@ -88,8 +88,15 @@ func (cfg *Config) report(candidates map[*types.Func]*candidate, pass *analysis.
 			continue
 		}
 		promoted := cfg.findPromotedParam(pass, cand)
-		if promoted == nil && cand.blankReceiverSites {
+		if cand.owner.TypeParams().Len() > 0 {
 			cand.unfixable = true
+		} else if promoted == nil {
+			if cand.blankReceiverSites {
+				cand.unfixable = true
+			}
+			if _, ok := cand.receiverNameOrBlank(); !ok {
+				cand.unfixable = true
+			}
 		}
 		diag := analysis.Diagnostic{
 			Pos: cand.decl.Name.Pos(),
@@ -273,7 +280,7 @@ func (cfg *Config) recordCallSite(
 	}
 	if cand.owner == nil {
 		cand.owner = owner
-	} else if !types.Identical(cand.owner, owner) {
+	} else if !cfg.sameNamedType(cand.owner, owner) {
 		cand.disqualify = true
 	}
 	cand.calls++
@@ -311,6 +318,39 @@ func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
 	return name
 }
 
+// receiverNameOrBlank resolves the name for decl's synthesized receiver
+// clause, borrowed from the first call site's own receiver. If that name is
+// already used somewhere in decl's own signature or body, reusing it as the
+// receiver would collide with an existing declaration there — e.g. a
+// "name, err := ..." short variable declaration would silently reassign the
+// receiver instead of declaring a new local — so the blank identifier is
+// used instead. The blank identifier cannot itself be referenced, so it is
+// unusable when decl also calls itself recursively; ok reports whether a
+// safe name was found.
+func (cand *candidate) receiverNameOrBlank() (name string, ok bool) {
+	name = cand.sites[0].receiver
+	if !cand.receiverNameCollides(name) {
+		return name, true
+	}
+	if len(cand.recursiveCalls) > 0 {
+		return "", false
+	}
+	return "_", true
+}
+
+// receiverNameCollides reports whether name is already used anywhere in
+// decl's signature or body.
+func (cand *candidate) receiverNameCollides(name string) bool {
+	collides := false
+	ast.Inspect(cand.decl, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
+			collides = true
+		}
+		return !collides
+	})
+	return collides
+}
+
 // suggestedFix builds the edits that turn decl into a method of owner. When
 // decl already takes owner (or *owner) as one of its own parameters,
 // promoted is set and that parameter becomes the receiver instead of a
@@ -345,7 +385,7 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 	if cand.ownerUsesPointerReceiver() {
 		star = "*"
 	}
-	recv := cand.sites[0].receiver
+	recv, _ := cand.receiverNameOrBlank()
 	edits := []analysis.TextEdit{cand.receiverClauseEdit(recv, star)}
 	for _, site := range cand.sites {
 		edits = append(edits, analysis.TextEdit{
@@ -361,11 +401,10 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 			NewText: []byte(recv + "."),
 		})
 	}
-	amp := ""
-	if star == "*" {
-		amp = "&"
+	testRecv := fmt.Sprintf("new(%s)", cand.owner.Obj().Name())
+	if star == "" {
+		testRecv = fmt.Sprintf("(*new(%s))", cand.owner.Obj().Name())
 	}
-	testRecv := fmt.Sprintf("(%s%s{})", amp, cand.owner.Obj().Name())
 	for _, site := range cand.testCalls {
 		edits = append(edits, analysis.TextEdit{
 			Pos:     site.ident.Pos(),
@@ -542,7 +581,8 @@ func (cfg *Config) matchOwnerParam(
 	if ptr, ok := t.(*types.Pointer); ok {
 		t, pointer = ptr.Elem(), true
 	}
-	if t == nil || !types.Identical(t, owner) {
+	named, ok := t.(*types.Named)
+	if !ok || !cfg.sameNamedType(named, owner) {
 		return nil
 	}
 	return &promotedParam{field: field, pointer: pointer, index: index}
@@ -599,6 +639,15 @@ func (cfg *Config) isIgnoredReceiver(named *types.Named, ignored []string) bool 
 	}
 	typeName := named.Obj().Name()
 	return slices.Contains(ignored, typeName)
+}
+
+// sameNamedType reports whether a and b are the same declared type,
+// comparing declaration identity rather than using types.Identical: two
+// methods of a generic type each declare their own type-parameter objects
+// in their receiver clause (e.g. "Box[T]" vs "Box[U]"), so types.Identical
+// reports those receivers as different even though they name the same type.
+func (cfg *Config) sameNamedType(a, b *types.Named) bool {
+	return a.Obj() == b.Obj()
 }
 
 func (cfg *Config) compileRegexes(patterns []string) []*regexp.Regexp {

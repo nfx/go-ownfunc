@@ -1,0 +1,25 @@
+package fixnamecollision
+
+type job struct {
+	id string
+}
+
+type jobQueue struct {
+	pending []*job
+}
+
+// nextJobID is called only from jobQueue's methods, but its own body already
+// declares a local named "q", the same name those callers use for their
+// receiver, so the synthesized receiver must not reuse it.
+func (_ *jobQueue) nextJobID(prefix string) string { // want "nextJobID is called only from methods of \\*jobQueue; consider making it an unexported method"
+	q := len(prefix)
+	return prefix + string(rune('a'+q%26))
+}
+
+func (q *jobQueue) Enqueue(prefix string) {
+	q.pending = append(q.pending, &job{id: q.nextJobID(prefix)})
+}
+
+func (q *jobQueue) Requeue(prefix string) {
+	q.pending = append(q.pending, &job{id: q.nextJobID(prefix)})
+}
