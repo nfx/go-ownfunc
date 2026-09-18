@@ -12,7 +12,6 @@
 +func (c *Cache) Invalidate() { c.clearMap(c.data) }
 +func (c *Cache) Reset()      { c.clearMap(c.data) } 
 ```
-## What it checks
 
 `ownfunc` considers unexported, package-level functions. It reports one only when all relevant direct calls are from methods of the same named receiver type; pointer and value receivers of that type count as the same owner. It does not report functions that are called from a free function, used by methods of different receiver types, exported, or ignored by configuration. By default, taking a candidate as a function value also disqualifies it. Suggested fixes convert the function into a method and qualify call sites. They handle recursive calls and calls in test files. A diagnostic remains available when the linter cannot safely produce a complete rewrite, such as a method with an unnamed receiver.
 
