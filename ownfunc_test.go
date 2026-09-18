@@ -146,6 +146,16 @@ func TestSuggestedFixesNonStructOwner(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixnonstruct")
 }
 
+func TestSuggestedFixesGeneric(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "generic")
+}
+
 func TestGenericOwnerUnfixable(t *testing.T) {
 	testdata := analysistest.TestData()
 
@@ -153,7 +163,7 @@ func TestGenericOwnerUnfixable(t *testing.T) {
 	cfg.ApplyDefaults()
 
 	analyzer := ownfunc.NewAnalyzer(cfg)
-	analysistest.Run(t, testdata, analyzer, "generic")
+	analysistest.Run(t, testdata, analyzer, "genericunfixable")
 }
 
 func TestIgnoreTestFilesToggle(t *testing.T) {

@@ -48,11 +48,15 @@ type candidate struct {
 
 // promotedParam identifies a candidate's own parameter that already carries
 // owner (or *owner), so the fix should promote it to a receiver instead of
-// synthesizing one.
+// synthesizing one. typeParam is set when owner is generic: it names decl's
+// own type-parameter field that must move from decl's type-parameter list
+// into the receiver's, since a Go method cannot declare type parameters of
+// its own.
 type promotedParam struct {
-	field   *ast.Field
-	pointer bool
-	index   int
+	field     *ast.Field
+	pointer   bool
+	index     int
+	typeParam *ast.Field
 }
 
 // NewAnalyzer constructs the ownfunc analyzer with the given configuration.
@@ -88,16 +92,7 @@ func (cfg *Config) report(candidates map[*types.Func]*candidate, pass *analysis.
 			continue
 		}
 		promoted := cfg.findPromotedParam(pass, cand)
-		if cand.owner.TypeParams().Len() > 0 {
-			cand.unfixable = true
-		} else if promoted == nil {
-			if cand.blankReceiverSites {
-				cand.unfixable = true
-			}
-			if _, ok := cand.receiverNameOrBlank(); !ok {
-				cand.unfixable = true
-			}
-		}
+		cand.unfixable = promoted == nil && cand.unfixableWithoutPromotion()
 		diag := analysis.Diagnostic{
 			Pos: cand.decl.Name.Pos(),
 			Message: fmt.Sprintf(
@@ -318,6 +313,19 @@ func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
 	return name
 }
 
+// unfixableWithoutPromotion reports whether decl cannot safely get a
+// synthesized receiver: either owner is generic and has no other way to
+// supply its type argument, every caller's own receiver is blank/unnamed, or
+// the only safe synthesized name would collide with decl's own body (see
+// receiverNameOrBlank) while decl also needs that name for a recursive call.
+func (cand *candidate) unfixableWithoutPromotion() bool {
+	if cand.owner.TypeParams().Len() > 0 || cand.blankReceiverSites {
+		return true
+	}
+	_, ok := cand.receiverNameOrBlank()
+	return !ok
+}
+
 // receiverNameOrBlank resolves the name for decl's synthesized receiver
 // clause, borrowed from the first call site's own receiver. If that name is
 // already used somewhere in decl's own signature or body, reusing it as the
@@ -363,13 +371,14 @@ func (cand *candidate) suggestedFix(promoted *promotedParam) analysis.SuggestedF
 	return cand.suggestedFixReceiver()
 }
 
-// receiverClauseEdit inserts a "(name star Owner) " receiver clause right
-// before decl's name, shared by both the synthesized and promoted fixes.
-func (cand *candidate) receiverClauseEdit(name, star string) analysis.TextEdit {
+// receiverClauseEdit inserts a "(name star Owner[typeParams]) " receiver
+// clause right before decl's name, shared by both the synthesized and
+// promoted fixes. typeParams is "" for a non-generic owner.
+func (cand *candidate) receiverClauseEdit(name, star, typeParams string) analysis.TextEdit {
 	return analysis.TextEdit{
 		Pos:     cand.decl.Name.Pos(),
 		End:     cand.decl.Name.Pos(),
-		NewText: fmt.Appendf(nil, "(%s %s%s) ", name, star, cand.owner.Obj().Name()),
+		NewText: fmt.Appendf(nil, "(%s %s%s%s) ", name, star, cand.owner.Obj().Name(), typeParams),
 	}
 }
 
@@ -386,7 +395,7 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 		star = "*"
 	}
 	recv, _ := cand.receiverNameOrBlank()
-	edits := []analysis.TextEdit{cand.receiverClauseEdit(recv, star)}
+	edits := []analysis.TextEdit{cand.receiverClauseEdit(recv, star, "")}
 	for _, site := range cand.sites {
 		edits = append(edits, analysis.TextEdit{
 			Pos:     site.ident.Pos(),
@@ -445,14 +454,22 @@ func (cand *candidate) ownerUsesPointerReceiver() bool {
 // suggestedFixPromoted turns decl into a method by promoting its own
 // owner-typed parameter into the receiver clause, keeping that parameter's
 // name and pointer-ness exactly as declared, and rewrites every call site so
-// the former argument expression becomes the receiver instead.
+// the former argument expression becomes the receiver instead. When owner is
+// generic, promoted.typeParam also moves from decl's own type-parameter list
+// into the receiver's, since a method cannot declare type parameters itself.
 func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.SuggestedFix {
 	name := promoted.field.Names[0].Name
 	star := ""
 	if promoted.pointer {
 		star = "*"
 	}
-	edits := []analysis.TextEdit{cand.receiverClauseEdit(name, star), cand.removeParamEdit(promoted)}
+	typeParams := ""
+	edits := []analysis.TextEdit{}
+	if promoted.typeParam != nil {
+		typeParams = "[" + promoted.typeParam.Names[0].Name + "]"
+		edits = append(edits, cand.removeTypeParamsEdit())
+	}
+	edits = append(edits, cand.receiverClauseEdit(name, star, typeParams), cand.removeParamEdit(promoted))
 	for _, site := range cand.sites {
 		edits = append(edits, cand.promotedCallEdits(site.ident, site.call, promoted)...)
 	}
@@ -472,6 +489,14 @@ func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.Su
 		),
 		TextEdits: edits,
 	}
+}
+
+// removeTypeParamsEdit deletes decl's own type-parameter clause (e.g.
+// "[T any]"), needed when that type parameter is promoted into the
+// receiver's type-parameter list instead.
+func (cand *candidate) removeTypeParamsEdit() analysis.TextEdit {
+	tparams := cand.decl.Type.TypeParams
+	return analysis.TextEdit{Pos: tparams.Pos(), End: tparams.End()}
 }
 
 // removeParamEdit deletes promoted's field from decl's parameter list,
@@ -559,7 +584,7 @@ func (cfg *Config) findPromotedParam(pass *analysis.Pass, cand *candidate) *prom
 	index := 0
 	for _, field := range cand.decl.Type.Params.List {
 		if len(field.Names) == 1 {
-			if pp := cfg.matchOwnerParam(pass, cand.owner, field, index); pp != nil {
+			if pp := cfg.matchOwnerParam(pass, cand, field, index); pp != nil {
 				return pp
 			}
 		}
@@ -569,10 +594,14 @@ func (cfg *Config) findPromotedParam(pass *analysis.Pass, cand *candidate) *prom
 }
 
 // matchOwnerParam reports whether field's type is owner or *owner, returning
-// the promotedParam describing it, or nil when it isn't.
+// the promotedParam describing it, or nil when it isn't. When owner is
+// generic, the match additionally requires decl's own type-parameter list to
+// be exactly the type argument owner is instantiated with here (see
+// matchGenericOwnerParam), since a Go method cannot declare type parameters
+// of its own.
 func (cfg *Config) matchOwnerParam(
 	pass *analysis.Pass,
-	owner *types.Named,
+	cand *candidate,
 	field *ast.Field,
 	index int,
 ) *promotedParam {
@@ -582,10 +611,44 @@ func (cfg *Config) matchOwnerParam(
 		t, pointer = ptr.Elem(), true
 	}
 	named, ok := t.(*types.Named)
-	if !ok || !cfg.sameNamedType(named, owner) {
+	if !ok || !cfg.sameNamedType(named, cand.owner) {
 		return nil
 	}
-	return &promotedParam{field: field, pointer: pointer, index: index}
+	if cand.owner.TypeParams().Len() == 0 {
+		return &promotedParam{field: field, pointer: pointer, index: index}
+	}
+	return cfg.matchGenericOwnerParam(pass, cand, named, field, pointer, index)
+}
+
+// matchGenericOwnerParam extends matchOwnerParam to a generic owner: the
+// promotion is only safe when decl declares exactly one type parameter and
+// field's type argument for owner is that same type parameter, since a
+// method cannot declare type parameters of its own — anything left over
+// after binding one to the receiver could not be expressed.
+func (cfg *Config) matchGenericOwnerParam(
+	pass *analysis.Pass,
+	cand *candidate,
+	named *types.Named,
+	field *ast.Field,
+	pointer bool,
+	index int,
+) *promotedParam {
+	tparams := cand.decl.Type.TypeParams
+	if tparams == nil || len(tparams.List) != 1 || len(tparams.List[0].Names) != 1 {
+		return nil
+	}
+	if cand.owner.TypeParams().Len() != 1 || named.TypeArgs().Len() != 1 {
+		return nil
+	}
+	declParam, ok := pass.TypesInfo.Defs[tparams.List[0].Names[0]].(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	arg, ok := named.TypeArgs().At(0).(*types.TypeParam)
+	if !ok || arg.Obj() != declParam {
+		return nil
+	}
+	return &promotedParam{field: field, pointer: pointer, index: index, typeParam: tparams.List[0]}
 }
 
 func (cfg *Config) extractCalleeIdent(expr ast.Expr) *ast.Ident {

@@ -8,14 +8,14 @@ type Box[T any] struct {
 // Box[T] as its own sole argument, using its own matching type parameter, so
 // it can still be promoted to a method: T moves from describe's own
 // type-parameter list into the receiver's.
-func describe[T any](b *Box[T]) T { // want "describe is called only from methods of \\*Box; consider making it an unexported method"
+func (b *Box[T]) describe() T { // want "describe is called only from methods of \\*Box; consider making it an unexported method"
 	return b.value
 }
 
 func (b *Box[T]) Get() T {
-	return describe(b)
+	return b.describe()
 }
 
 func (b *Box[T]) Peek() T {
-	return describe(b)
+	return b.describe()
 }
