@@ -136,6 +136,26 @@ func TestSuggestedFixesNameCollision(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixnamecollision")
 }
 
+func TestSuggestedFixesNilable(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixnilable")
+}
+
+func TestSuggestedFixesPromotedRename(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixpromotedrename")
+}
+
 func TestSuggestedFixesNonStructOwner(t *testing.T) {
 	testdata := analysistest.TestData()
 

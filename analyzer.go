@@ -51,12 +51,17 @@ type candidate struct {
 // synthesizing one. typeParam is set when owner is generic: it names decl's
 // own type-parameter field that must move from decl's type-parameter list
 // into the receiver's, since a Go method cannot declare type parameters of
-// its own.
+// its own. receiverName is the name to give the promoted receiver: normally
+// field's own name, but renamed to match owner's established receiver-name
+// convention when that's safe (see newPromotedParam); renameIdents then
+// lists field's occurrences inside decl that must be rewritten to match.
 type promotedParam struct {
-	field     *ast.Field
-	pointer   bool
-	index     int
-	typeParam *ast.Field
+	field        *ast.Field
+	pointer      bool
+	index        int
+	typeParam    *ast.Field
+	receiverName string
+	renameIdents []*ast.Ident
 }
 
 // NewAnalyzer constructs the ownfunc analyzer with the given configuration.
@@ -322,20 +327,20 @@ func (cand *candidate) unfixableWithoutPromotion() bool {
 	if cand.owner.TypeParams().Len() > 0 || cand.blankReceiverSites {
 		return true
 	}
-	_, ok := cand.receiverNameOrBlank()
+	_, ok := cand.receiverNameOrOmitted()
 	return !ok
 }
 
-// receiverNameOrBlank resolves the name for decl's synthesized receiver
+// receiverNameOrOmitted resolves the name for decl's synthesized receiver
 // clause, borrowed from the first call site's own receiver. If that name is
 // already used somewhere in decl's own signature or body, reusing it as the
 // receiver would collide with an existing declaration there — e.g. a
 // "name, err := ..." short variable declaration would silently reassign the
-// receiver instead of declaring a new local — so the blank identifier is
-// used instead. The blank identifier cannot itself be referenced, so it is
-// unusable when decl also calls itself recursively; ok reports whether a
-// safe name was found.
-func (cand *candidate) receiverNameOrBlank() (name string, ok bool) {
+// receiver instead of declaring a new local — so the name is omitted from
+// the receiver clause instead. An omitted name cannot itself be referenced,
+// so it is unusable when decl also calls itself recursively; ok reports
+// whether a safe name (possibly omitted) was found.
+func (cand *candidate) receiverNameOrOmitted() (name string, ok bool) {
 	name = cand.sites[0].receiver
 	if !cand.receiverNameCollides(name) {
 		return name, true
@@ -343,7 +348,7 @@ func (cand *candidate) receiverNameOrBlank() (name string, ok bool) {
 	if len(cand.recursiveCalls) > 0 {
 		return "", false
 	}
-	return "_", true
+	return "", true
 }
 
 // receiverNameCollides reports whether name is already used anywhere in
@@ -373,12 +378,18 @@ func (cand *candidate) suggestedFix(promoted *promotedParam) analysis.SuggestedF
 
 // receiverClauseEdit inserts a "(name star Owner[typeParams]) " receiver
 // clause right before decl's name, shared by both the synthesized and
-// promoted fixes. typeParams is "" for a non-generic owner.
+// promoted fixes. typeParams is "" for a non-generic owner. name is "" when
+// the receiver is unused, in which case it is omitted from the clause
+// entirely rather than written as "_".
 func (cand *candidate) receiverClauseEdit(name, star, typeParams string) analysis.TextEdit {
+	prefix := ""
+	if name != "" {
+		prefix = name + " "
+	}
 	return analysis.TextEdit{
 		Pos:     cand.decl.Name.Pos(),
 		End:     cand.decl.Name.Pos(),
-		NewText: fmt.Appendf(nil, "(%s %s%s%s) ", name, star, cand.owner.Obj().Name(), typeParams),
+		NewText: fmt.Appendf(nil, "(%s%s%s%s) ", prefix, star, cand.owner.Obj().Name(), typeParams),
 	}
 }
 
@@ -394,7 +405,7 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 	if cand.ownerUsesPointerReceiver() {
 		star = "*"
 	}
-	recv, _ := cand.receiverNameOrBlank()
+	recv, _ := cand.receiverNameOrOmitted()
 	edits := []analysis.TextEdit{cand.receiverClauseEdit(recv, star, "")}
 	for _, site := range cand.sites {
 		edits = append(edits, analysis.TextEdit{
@@ -410,10 +421,7 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 			NewText: []byte(recv + "."),
 		})
 	}
-	testRecv := fmt.Sprintf("new(%s)", cand.owner.Obj().Name())
-	if star == "" {
-		testRecv = fmt.Sprintf("(*new(%s))", cand.owner.Obj().Name())
-	}
+	testRecv := cand.testCallReceiver(star)
 	for _, site := range cand.testCalls {
 		edits = append(edits, analysis.TextEdit{
 			Pos:     site.ident.Pos(),
@@ -427,6 +435,34 @@ func (cand *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 	return analysis.SuggestedFix{
 		Message:   fmt.Sprintf("Convert %s to a method of %s%s", cand.obj.Name(), star, cand.owner.Obj().Name()),
 		TextEdits: edits,
+	}
+}
+
+// testCallReceiver returns the receiver expression used to synthesize an
+// instance of owner for a dangling test-file call. A pointer receiver just
+// needs new(Owner). A value receiver would need to dereference that pointer,
+// but when owner's underlying type accepts nil as a conversion (a slice,
+// map, chan, func, pointer, or interface), Owner(nil) is the more idiomatic
+// zero-value expression and is used instead.
+func (cand *candidate) testCallReceiver(star string) string {
+	name := cand.owner.Obj().Name()
+	if star != "" {
+		return fmt.Sprintf("new(%s)", name)
+	}
+	if cand.ownerAcceptsNil() {
+		return name + "(nil)"
+	}
+	return fmt.Sprintf("(*new(%s))", name)
+}
+
+// ownerAcceptsNil reports whether owner's underlying type is one nil
+// converts to directly.
+func (cand *candidate) ownerAcceptsNil() bool {
+	switch cand.owner.Underlying().(type) {
+	case *types.Slice, *types.Map, *types.Chan, *types.Signature, *types.Pointer, *types.Interface:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -453,12 +489,16 @@ func (cand *candidate) ownerUsesPointerReceiver() bool {
 
 // suggestedFixPromoted turns decl into a method by promoting its own
 // owner-typed parameter into the receiver clause, keeping that parameter's
-// name and pointer-ness exactly as declared, and rewrites every call site so
-// the former argument expression becomes the receiver instead. When owner is
-// generic, promoted.typeParam also moves from decl's own type-parameter list
-// into the receiver's, since a method cannot declare type parameters itself.
+// pointer-ness exactly as declared, and rewrites every call site so the
+// former argument expression becomes the receiver instead. The receiver
+// keeps the parameter's own name unless promoted.receiverName renames it to
+// match owner's established receiver-name convention, in which case every
+// occurrence inside decl is rewritten too (see newPromotedParam). When owner
+// is generic, promoted.typeParam also moves from decl's own type-parameter
+// list into the receiver's, since a method cannot declare type parameters
+// itself.
 func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.SuggestedFix {
-	name := promoted.field.Names[0].Name
+	name := promoted.receiverName
 	star := ""
 	if promoted.pointer {
 		star = "*"
@@ -470,6 +510,9 @@ func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.Su
 		edits = append(edits, cand.removeTypeParamsEdit())
 	}
 	edits = append(edits, cand.receiverClauseEdit(name, star, typeParams), cand.removeParamEdit(promoted))
+	for _, ident := range promoted.renameIdents {
+		edits = append(edits, analysis.TextEdit{Pos: ident.Pos(), End: ident.End(), NewText: []byte(name)})
+	}
 	for _, site := range cand.sites {
 		edits = append(edits, cand.promotedCallEdits(site.ident, site.call, promoted)...)
 	}
@@ -615,7 +658,7 @@ func (cfg *Config) matchOwnerParam(
 		return nil
 	}
 	if cand.owner.TypeParams().Len() == 0 {
-		return &promotedParam{field: field, pointer: pointer, index: index}
+		return cfg.newPromotedParam(pass, cand, field, pointer, index, nil)
 	}
 	return cfg.matchGenericOwnerParam(pass, cand, named, field, pointer, index)
 }
@@ -648,7 +691,98 @@ func (cfg *Config) matchGenericOwnerParam(
 	if !ok || arg.Obj() != declParam {
 		return nil
 	}
-	return &promotedParam{field: field, pointer: pointer, index: index, typeParam: tparams.List[0]}
+	return cfg.newPromotedParam(pass, cand, field, pointer, index, tparams.List[0])
+}
+
+// newPromotedParam builds the promotedParam for field, preferring to rename
+// its receiver to owner's established receiver-name convention (see
+// establishedReceiverName) over keeping field's own name, when that rename
+// is unambiguous: every occurrence of field's own name inside decl must
+// resolve to field itself, and the established name must not already be
+// used by anything else in decl.
+func (cfg *Config) newPromotedParam(
+	pass *analysis.Pass,
+	cand *candidate,
+	field *ast.Field,
+	pointer bool,
+	index int,
+	typeParam *ast.Field,
+) *promotedParam {
+	pp := &promotedParam{
+		field:        field,
+		pointer:      pointer,
+		index:        index,
+		typeParam:    typeParam,
+		receiverName: field.Names[0].Name,
+	}
+	established := cfg.establishedReceiverName(cand)
+	if established == "" || established == pp.receiverName {
+		return pp
+	}
+	obj := pass.TypesInfo.Defs[field.Names[0]]
+	if cfg.identsCollide(pass, cand.decl, obj, established) {
+		return pp
+	}
+	pp.receiverName = established
+	pp.renameIdents = cfg.identsOfObject(pass, cand.decl, obj)
+	return pp
+}
+
+// establishedReceiverName returns the most common receiver name across
+// owner's existing methods (ties broken by first occurrence), or "" when no
+// method has a named, non-blank receiver.
+func (cfg *Config) establishedReceiverName(cand *candidate) string {
+	counts := make(map[string]int)
+	var order []string
+	for i := range cand.owner.NumMethods() {
+		recv := cand.owner.Method(i).Signature().Recv()
+		if recv == nil || recv.Name() == "" || recv.Name() == "_" {
+			continue
+		}
+		if counts[recv.Name()] == 0 {
+			order = append(order, recv.Name())
+		}
+		counts[recv.Name()]++
+	}
+	best := ""
+	for _, name := range order {
+		if best == "" || counts[name] > counts[best] {
+			best = name
+		}
+	}
+	return best
+}
+
+// identsOfObject collects every *ast.Ident inside decl that resolves to obj.
+func (cfg *Config) identsOfObject(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object) []*ast.Ident {
+	var idents []*ast.Ident
+	ast.Inspect(decl, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok && pass.TypesInfo.Uses[ident] == obj {
+			idents = append(idents, ident)
+		}
+		return true
+	})
+	return idents
+}
+
+// identsCollide reports whether decl already declares or uses some object
+// named name other than obj, which would make renaming obj's occurrences to
+// name unsafe (shadowing or reassigning an unrelated identifier).
+func (cfg *Config) identsCollide(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object, name string) bool {
+	collides := false
+	ast.Inspect(decl, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok || ident.Name != name || collides {
+			return !collides
+		}
+		target := pass.TypesInfo.Defs[ident]
+		if target == nil {
+			target = pass.TypesInfo.Uses[ident]
+		}
+		collides = target != obj
+		return !collides
+	})
+	return collides
 }
 
 func (cfg *Config) extractCalleeIdent(expr ast.Expr) *ast.Ident {

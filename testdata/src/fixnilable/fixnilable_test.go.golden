@@ -1,0 +1,7 @@
+package fixnilable
+
+import "testing"
+
+func TestBuildBars(t *testing.T) {
+	bars(nil).buildBars(3)
+}

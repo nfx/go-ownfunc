@@ -1,0 +1,18 @@
+package fixnilable
+
+type bars []int
+
+// buildBars is called by bars' value-receiver methods and also directly
+// from a test; bars' underlying type accepts nil, so the synthesized test
+// instance uses bars(nil) rather than dereferencing new(bars).
+func buildBars(n int) bars { // want "buildBars is called only from methods of \\*bars; consider making it an unexported method"
+	return make(bars, n)
+}
+
+func (b bars) Sum(n int) bars {
+	return buildBars(n)
+}
+
+func (b bars) Resum(n int) bars {
+	return buildBars(n)
+}
