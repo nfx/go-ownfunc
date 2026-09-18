@@ -195,3 +195,27 @@ func TestGenericOwnerUnfixable(t *testing.T) {
 	analyzer := cfg.Analyzer()
 	analysistest.Run(t, testdata, analyzer, "genericunfixable")
 }
+
+func TestBlankCallerReceiverCollisionUnfixable(t *testing.T) {
+	testdata := analysistest.TestData()
+	cfg := ownfunc.Ownfunc{}
+	analyzer := cfg.Analyzer()
+	// RunWithSuggestedFixes (not Run) so a stray SuggestedFix here — no
+	// .golden file exists for this package — fails the test loudly instead
+	// of passing silently.
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "blankcallercollision")
+}
+
+func TestSuggestedFixesBlankCallerReceiverRename(t *testing.T) {
+	testdata := analysistest.TestData()
+	cfg := ownfunc.Ownfunc{}
+	analyzer := cfg.Analyzer()
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixblankcallerrename")
+}
+
+func TestSuggestedFixesBlankCallerReceiverRenameCounter(t *testing.T) {
+	testdata := analysistest.TestData()
+	cfg := ownfunc.Ownfunc{}
+	analyzer := cfg.Analyzer()
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixblankcallercollisioncounter")
+}

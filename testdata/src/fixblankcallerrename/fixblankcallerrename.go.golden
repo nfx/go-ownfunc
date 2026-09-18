@@ -1,0 +1,23 @@
+package fixblankcallerrename
+
+type jobQueue struct {
+	pending []string
+}
+
+func (q *jobQueue) Enqueue(id string) {
+	q.pending = append(q.pending, q.nextJobID(id))
+}
+
+// nextJobID is called only from jobQueue methods, but Requeue's own receiver
+// is blank and its body already declares a local named "q" — jobQueue's
+// established receiver-name convention. Since "qV" is free, the fix renames
+// that local out of the way before naming Requeue's receiver "q".
+func (q *jobQueue) nextJobID(id string) string { // want "nextJobID is called only from methods of \\*jobQueue; consider making it an unexported method"
+	return id + "-id"
+}
+
+func (q *jobQueue) Requeue(id string) {
+	qV := len(id)
+	_ = q.nextJobID(id)
+	_ = qV
+}

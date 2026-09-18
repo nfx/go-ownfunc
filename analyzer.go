@@ -22,11 +22,14 @@ import (
 // itself, the identifier naming it, and (for genuine call sites, not
 // recursive or test-file ones) the receiver identifier in scope at that
 // point (the caller is always a method, per the disqualification rules in
-// the run phase).
+// the run phase) and the caller's own FuncDecl, needed to compare its
+// receiver's type argument against decl's own inferred one for a candidate
+// whose owner is generic (see declTypeParamMatchesOwner).
 type callSite struct {
 	ident    *ast.Ident
 	call     *ast.CallExpr
 	receiver string
+	caller   *ast.FuncDecl
 }
 
 // promotedParam identifies a candidate's own parameter that already carries
@@ -80,6 +83,12 @@ func (o *Ownfunc) report(candidates map[*types.Func]*candidate, pass *analysis.P
 			continue
 		}
 		promoted := o.findPromotedParam(pass, cand)
+		if promoted == nil && o.skipCandidate(cand, pass) {
+			continue
+		}
+		if promoted == nil {
+			cand.resolveBlankReceivers(pass, o.establishedReceiverName(cand))
+		}
 		cand.unfixable = promoted == nil && cand.unfixableWithoutPromotion()
 		diag := analysis.Diagnostic{
 			Pos: cand.decl.Name.Pos(),
@@ -96,6 +105,20 @@ func (o *Ownfunc) report(candidates map[*types.Func]*candidate, pass *analysis.P
 		}
 		pass.Report(diag)
 	}
+}
+
+// skipCandidate flags generic owner plus decl's own type parameter,
+// with no promotable param to prove the binding, means "consider
+// making it a method" is only sound advice when declTypeParamMatchesOwner
+// confirms every call site agrees on decl's type parameter;
+// otherwise decl cannot become any method of owner at all (not merely
+//
+//	one this tool can't auto-fix), so the diagnostic itself would be
+//
+// misleading and is skipped.
+func (o *Ownfunc) skipCandidate(cand *candidate, pass *analysis.Pass) bool {
+	return cand.owner.TypeParams().Len() > 0 && cand.decl.Type.TypeParams != nil &&
+		!o.declTypeParamMatchesOwner(pass, cand)
 }
 
 func (o *Ownfunc) candidates(pass *analysis.Pass) map[*types.Func]*candidate {
@@ -247,9 +270,9 @@ func (o *Ownfunc) inspectCallExpr(
 
 // recordCallSite updates cand with a genuine, non-recursive call from caller:
 // tracking the owner type, the call count, and the rewrite site for the
-// suggested fix. A blank/unnamed caller receiver is recorded rather than
-// rejected outright, since it only matters when the fix ends up needing a
-// synthesized receiver (see findPromotedParam).
+// suggested fix. A blank/unnamed caller receiver is recorded as "" rather
+// than rejected outright, since it only matters when the fix ends up needing
+// a synthesized receiver — resolveBlankReceivers then tries to name it.
 func (o *Ownfunc) recordCallSite(
 	pass *analysis.Pass,
 	caller *ast.FuncDecl,
@@ -268,13 +291,11 @@ func (o *Ownfunc) recordCallSite(
 	}
 	cand.calls++
 	recv := o.receiverName(caller)
-	if recv == "" {
-		cand.blankReceiverSites = true
-	}
 	cand.sites = append(cand.sites, callSite{
 		ident:    ident,
 		call:     call,
 		receiver: recv,
+		caller:   caller,
 	})
 }
 
@@ -415,6 +436,51 @@ func (o *Ownfunc) matchGenericOwnerParam(
 		return nil
 	}
 	return o.newPromotedParam(pass, cand, field, pointer, index, tparams.List[0])
+}
+
+// declTypeParamMatchesOwner reports whether decl's own type parameter can be
+// moved into a synthesized receiver's type-parameter list even though decl
+// takes no promotable owner-typed argument (see matchGenericOwnerParam for
+// that case). It requires decl and owner to each declare exactly one type
+// parameter, and every genuine call site to instantiate decl's type
+// parameter as exactly the calling method's own receiver type argument —
+// proven the same way matchGenericOwnerParam proves a promoted param's type
+// argument, but read from each call's recorded instantiation instead of a
+// parameter's declared type, since here there is no such parameter.
+func (o *Ownfunc) declTypeParamMatchesOwner(pass *analysis.Pass, cand *candidate) bool {
+	tparams := cand.decl.Type.TypeParams
+	if tparams == nil || len(tparams.List) != 1 || len(tparams.List[0].Names) != 1 {
+		return false
+	}
+	if cand.owner.TypeParams().Len() != 1 {
+		return false
+	}
+	for _, site := range cand.sites {
+		if !o.siteInstantiatesOwnerTypeParam(pass, site) {
+			return false
+		}
+	}
+	return true
+}
+
+// siteInstantiatesOwnerTypeParam reports whether site's call to decl was
+// inferred, at that call, to instantiate decl's type parameter with exactly
+// site.caller's own receiver type argument.
+func (o *Ownfunc) siteInstantiatesOwnerTypeParam(pass *analysis.Pass, site callSite) bool {
+	inst, ok := pass.TypesInfo.Instances[site.ident]
+	if !ok || inst.TypeArgs.Len() != 1 {
+		return false
+	}
+	callArg, ok := inst.TypeArgs.At(0).(*types.TypeParam)
+	if !ok {
+		return false
+	}
+	callerOwner := o.canonicalReceiverType(pass, site.caller)
+	if callerOwner == nil || callerOwner.TypeArgs().Len() != 1 {
+		return false
+	}
+	callerArg, ok := callerOwner.TypeArgs().At(0).(*types.TypeParam)
+	return ok && callArg == callerArg
 }
 
 // newPromotedParam builds the promotedParam for field, preferring to rename

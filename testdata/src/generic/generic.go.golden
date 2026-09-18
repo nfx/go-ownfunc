@@ -19,3 +19,37 @@ func (b *Box[T]) Get() T {
 func (b *Box[T]) Peek() T {
 	return b.describe()
 }
+
+// defaultLabel is called only from methods of the generic Box type and takes
+// no argument that could supply Box's type parameter, but it also declares
+// none of its own, so a receiver naming Box's own type parameter can be
+// synthesized without needing to prove anything about it.
+func (b *Box[T]) defaultLabel() string { // want "defaultLabel is called only from methods of \\*Box; consider making it an unexported method"
+	return "box"
+}
+
+func (b *Box[T]) Label() string {
+	return b.defaultLabel()
+}
+
+func (b *Box[T]) Describe() string {
+	return b.defaultLabel()
+}
+
+// consume is called only from methods of the generic Box type and declares
+// its own type parameter, matching Box's, but takes no Box-typed argument to
+// promote. Every call site still passes a yield already typed for the
+// calling method's own T, so ownfunc can prove decl's type parameter is
+// always instantiated with exactly that receiver's own type argument and
+// move it into a synthesized receiver instead of leaving decl unfixable.
+func (b *Box[T]) consume(yield func(T) bool) bool { // want "consume is called only from methods of \\*Box; consider making it an unexported method"
+	return yield(*new(T))
+}
+
+func (b *Box[T]) Consume(yield func(T) bool) bool {
+	return b.consume(yield)
+}
+
+func (b *Box[T]) ConsumeAgain(yield func(T) bool) bool {
+	return b.consume(yield)
+}

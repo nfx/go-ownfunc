@@ -9,35 +9,221 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
 
 type candidate struct {
-	decl               *ast.FuncDecl
-	obj                *types.Func
-	owner              *types.Named
-	calls              int
-	disqualify         bool
-	unfixable          bool
-	blankReceiverSites bool
-	sites              []callSite
-	recursiveCalls     []callSite
-	testCalls          []callSite
-	fset               *token.FileSet
+	decl              *ast.FuncDecl
+	obj               *types.Func
+	owner             *types.Named
+	calls             int
+	disqualify        bool
+	unfixable         bool
+	blankReceiverName string
+	namedCallers      []*ast.FuncDecl
+	renameEdits       []analysis.TextEdit
+	sites             []callSite
+	recursiveCalls    []callSite
+	testCalls         []callSite
+	fset              *token.FileSet
 }
 
 // unfixableWithoutPromotion reports whether decl cannot safely get a
-// synthesized receiver: either owner is generic and has no other way to
-// supply its type argument, every caller's own receiver is blank/unnamed, or
-// the only safe synthesized name would collide with decl's own body (see
-// receiverNameOrBlank) while decl also needs that name for a recursive call.
+// synthesized receiver: either some call site's caller still has no receiver
+// identifier in scope — its own receiver was blank and resolveBlankReceivers
+// couldn't safely name it — or the only safe synthesized name for decl's own
+// receiver would collide with decl's own body (see receiverNameOrOmitted)
+// while decl also needs that name for a recursive call. It is never called
+// for a candidate whose owner is generic and whose own type-parameter list
+// couldn't be proven, via declTypeParamMatchesOwner, to bind the same way a
+// synthesized receiver would — report skips reporting those entirely rather
+// than reaching this method, since decl genuinely cannot become any method of
+// owner in that case (see report).
 func (c *candidate) unfixableWithoutPromotion() bool {
-	if c.owner.TypeParams().Len() > 0 || c.blankReceiverSites {
+	if c.hasBlankReceiverSite() {
 		return true
 	}
 	_, ok := c.receiverNameOrOmitted()
 	return !ok
+}
+
+// hasBlankReceiverSite reports whether any recorded call site still has no
+// receiver identifier to qualify it with. resolveBlankReceivers runs before
+// this is checked, so a site only remains blank here when its caller
+// couldn't safely be given a synthesized receiver name.
+func (c *candidate) hasBlankReceiverSite() bool {
+	for _, site := range c.sites {
+		if site.receiver == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveBlankReceivers attempts to give every blank-receiver call site's
+// caller a real receiver name, using owner's established receiver-name
+// convention (established), so those sites can be qualified like any other
+// call. When established already collides with something in a caller's own
+// signature or body — typically a local variable reusing the same short
+// name — renameCollidingLocals first tries to free it by suffixing every
+// occurrence of the colliding declaration with "V", "V2", "V3", and so on.
+// Nothing is mutated, and false is returned, when established is empty or a
+// caller still can't be freed up even after exhausting those attempts. On
+// success, each resolved site's
+// receiver is set to established, its caller is recorded in c.namedCallers
+// (deduplicated, since the same caller can hold more than one call site) so
+// suggestedFixReceiver can add the matching receiver-clause edit, and any
+// rename edits collected along the way are recorded in c.renameEdits.
+func (c *candidate) resolveBlankReceivers(pass *analysis.Pass, established string) bool {
+	var toName []int
+	var callers []*ast.FuncDecl
+	var renames []analysis.TextEdit
+	seen := make(map[*ast.FuncDecl]bool)
+	for i, site := range c.sites {
+		if site.receiver != "" {
+			continue
+		}
+		if established == "" {
+			return false
+		}
+		toName = append(toName, i)
+		if seen[site.caller] {
+			continue
+		}
+		seen[site.caller] = true
+		if c.identCollidesIn(site.caller, established) {
+			edits, ok := c.renameCollidingLocals(pass, site.caller, established)
+			if !ok {
+				return false
+			}
+			renames = append(renames, edits...)
+		}
+		callers = append(callers, site.caller)
+	}
+	for _, i := range toName {
+		c.sites[i].receiver = established
+	}
+	c.blankReceiverName = established
+	c.namedCallers = callers
+	c.renameEdits = renames
+	return true
+}
+
+// renameCollidingLocals frees established for use as caller's receiver name
+// by suffixing every occurrence of whichever local declaration(s) inside
+// caller already use that name with the first free name freeRenamedName
+// finds (e.g. "e" becomes "eV", or "eV2" if "eV" is itself taken), so the
+// receiver and the renamed local no longer share an identifier. ok is false
+// when no such declaration is found, or every candidate name up to
+// maxRenameSuffix collides with something else in caller, in which case no
+// edits are returned and the rename is abandoned.
+func (c *candidate) renameCollidingLocals(
+	pass *analysis.Pass,
+	caller *ast.FuncDecl,
+	established string,
+) (edits []analysis.TextEdit, ok bool) {
+	renamed := c.freeRenamedName(caller, established)
+	if renamed == "" {
+		return nil, false
+	}
+	objs := c.collidingObjects(pass, caller, established)
+	if len(objs) == 0 {
+		return nil, false
+	}
+	for _, obj := range objs {
+		for _, ident := range c.declAndUsesOfObject(pass, caller, obj) {
+			edits = append(edits, analysis.TextEdit{Pos: ident.Pos(), End: ident.End(), NewText: []byte(renamed)})
+		}
+	}
+	return edits, true
+}
+
+// maxRenameSuffix caps how many suffixed candidate names freeRenamedName
+// tries before giving up; established+"V1000" also colliding is never
+// realistically hit.
+const maxRenameSuffix = 1000
+
+// freeRenamedName finds the first name, in the established+"V",
+// established+"V2", established+"V3", ... sequence, that doesn't collide with
+// anything already declared in caller. Returns "" if every candidate up to
+// established+"V"+maxRenameSuffix collides.
+func (c *candidate) freeRenamedName(caller *ast.FuncDecl, established string) string {
+	name := established + "V"
+	if !c.identCollidesIn(caller, name) {
+		return name
+	}
+	for n := 2; n <= maxRenameSuffix; n++ {
+		name = fmt.Sprintf("%sV%d", established, n)
+		if !c.identCollidesIn(caller, name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// collidingObjects returns every distinct object declared inside caller
+// under the exact name established — normally just one (e.g. a single loop
+// variable), but a name can be redeclared in separate, non-overlapping
+// blocks within the same function, so all of them are collected.
+func (c *candidate) collidingObjects(pass *analysis.Pass, caller *ast.FuncDecl, established string) []types.Object {
+	seen := make(map[types.Object]bool)
+	var objs []types.Object
+	ast.Inspect(caller, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok || ident.Name != established {
+			return true
+		}
+		obj := pass.TypesInfo.Defs[ident]
+		if obj != nil && !seen[obj] {
+			seen[obj] = true
+			objs = append(objs, obj)
+		}
+		return true
+	})
+	return objs
+}
+
+// declAndUsesOfObject collects every *ast.Ident inside decl that either
+// declares obj or resolves to it: the local's own declaration site plus
+// every place it's read afterward, needed to rename a colliding local
+// everywhere it appears rather than just where it's used.
+func (c *candidate) declAndUsesOfObject(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object) []*ast.Ident {
+	var idents []*ast.Ident
+	ast.Inspect(decl, func(n ast.Node) bool {
+		ident, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if pass.TypesInfo.Defs[ident] == obj || pass.TypesInfo.Uses[ident] == obj {
+			idents = append(idents, ident)
+		}
+		return true
+	})
+	return idents
+}
+
+// nameCallerReceiverEdit gives caller's own receiver clause the name
+// established, when it currently has none. It inserts the name before the
+// receiver's type when the clause declares no identifier at all (e.g.
+// "(*Engine)"), or replaces the existing blank identifier in place when it
+// does (e.g. "(_ *Engine)").
+func (c *candidate) nameCallerReceiverEdit(caller *ast.FuncDecl, established string) analysis.TextEdit {
+	field := caller.Recv.List[0]
+	if len(field.Names) == 0 {
+		return analysis.TextEdit{
+			Pos:     field.Type.Pos(),
+			End:     field.Type.Pos(),
+			NewText: []byte(established + " "),
+		}
+	}
+	blank := field.Names[0]
+	return analysis.TextEdit{
+		Pos:     blank.Pos(),
+		End:     blank.End(),
+		NewText: []byte(established),
+	}
 }
 
 // receiverNameOrOmitted resolves the name for decl's synthesized receiver
@@ -51,7 +237,7 @@ func (c *candidate) unfixableWithoutPromotion() bool {
 // whether a safe name (possibly omitted) was found.
 func (c *candidate) receiverNameOrOmitted() (name string, ok bool) {
 	name = c.sites[0].receiver
-	if !c.receiverNameCollides(name) {
+	if !c.identCollidesIn(c.decl, name) {
 		return name, true
 	}
 	if len(c.recursiveCalls) > 0 {
@@ -60,11 +246,11 @@ func (c *candidate) receiverNameOrOmitted() (name string, ok bool) {
 	return "", true
 }
 
-// receiverNameCollides reports whether name is already used anywhere in
-// decl's signature or body.
-func (c *candidate) receiverNameCollides(name string) bool {
+// identCollidesIn reports whether name is already used anywhere in decl's
+// signature or body.
+func (c *candidate) identCollidesIn(decl *ast.FuncDecl, name string) bool {
 	collides := false
-	ast.Inspect(c.decl, func(n ast.Node) bool {
+	ast.Inspect(decl, func(n ast.Node) bool {
 		if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
 			collides = true
 		}
@@ -102,20 +288,56 @@ func (c *candidate) receiverClauseEdit(name, star, typeParams string) analysis.T
 	}
 }
 
+// ownerTypeParamsClause returns owner's own type-parameter names as a
+// receiver clause suffix (e.g. "[T]" or "[K, V]"), or "" when owner isn't
+// generic. Used to synthesize a receiver for decl when decl has no type
+// parameters of its own to bind to owner's — the names are declared fresh
+// on the receiver and left unused by decl's body, which is valid regardless
+// of what owner's type argument actually is at each call site.
+func (c *candidate) ownerTypeParamsClause() string {
+	tparams := c.owner.TypeParams()
+	if tparams.Len() == 0 {
+		return ""
+	}
+	names := make([]string, tparams.Len())
+	for i := range names {
+		names[i] = tparams.At(i).Obj().Name()
+	}
+	return "[" + strings.Join(names, ", ") + "]"
+}
+
 // suggestedFixReceiver builds the edits that turn decl into a method of
 // owner by adding a synthesized receiver clause and qualifying every
 // recorded call site, including recursive self-calls, which take the new
 // method's own receiver name, and dangling test-file calls, which get a
-// freshly literal owner instance since no receiver is in scope there. The
-// receiver is a pointer unless owner's existing methods are exclusively
-// value-receiver.
+// freshly literal owner instance since no receiver is in scope there. Any
+// caller in c.namedCallers also gets its own previously blank receiver
+// clause named, via resolveBlankReceivers, so its call sites can be
+// qualified too, alongside c.renameEdits for any local that had to be
+// renamed out of the way first. The receiver is a pointer unless owner's
+// existing methods are exclusively value-receiver. When owner is generic,
+// the receiver's type-parameter names come from decl's own type-parameter
+// list if it has one (moved there since declTypeParamMatchesOwner proved it
+// matches, and removed from decl's own list since a method can't declare
+// type parameters of its own) or otherwise from owner's, left unused in
+// decl's body.
 func (c *candidate) suggestedFixReceiver() analysis.SuggestedFix {
 	star := ""
 	if c.ownerUsesPointerReceiver() {
 		star = "*"
 	}
 	recv, _ := c.receiverNameOrOmitted()
-	edits := []analysis.TextEdit{c.receiverClauseEdit(recv, star, "")}
+	typeParams := c.ownerTypeParamsClause()
+	edits := []analysis.TextEdit{}
+	if c.decl.Type.TypeParams != nil {
+		typeParams = "[" + c.decl.Type.TypeParams.List[0].Names[0].Name + "]"
+		edits = append(edits, c.removeTypeParamsEdit())
+	}
+	edits = append(edits, c.receiverClauseEdit(recv, star, typeParams))
+	edits = append(edits, c.renameEdits...)
+	for _, caller := range c.namedCallers {
+		edits = append(edits, c.nameCallerReceiverEdit(caller, c.blankReceiverName))
+	}
 	for _, site := range c.sites {
 		edits = append(edits, analysis.TextEdit{
 			Pos:     site.ident.Pos(),

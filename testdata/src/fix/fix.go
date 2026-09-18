@@ -16,8 +16,9 @@ func (c *Cache) Reset() {
 	clearMap(c.data)
 }
 
-// unnamed receives no receiver identifier, so the fix cannot rewrite this
-// call site into a method call and must stay a plain diagnostic.
+// unnamed's caller Touch has a blank receiver, so the fix must first name it,
+// using Cache's established receiver-name convention ("c"), before it can
+// rewrite the call site into a method call.
 func unnamed(m map[string]string) { // want "unnamed is called only from methods of \\*Cache; consider making it an unexported method"
 	clear(m)
 }
