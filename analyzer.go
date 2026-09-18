@@ -64,9 +64,9 @@ type promotedParam struct {
 	renameIdents []*ast.Ident
 }
 
-// NewAnalyzer constructs the ownfunc analyzer with the given configuration.
-func NewAnalyzer(cfg Config) *analysis.Analyzer {
-	cfg.ApplyDefaults()
+// Analyzer constructs the ownfunc analyzer with the given configuration.
+func (cfg *Ownfunc) Analyzer() *analysis.Analyzer {
+	cfg.applyDefaults()
 	return &analysis.Analyzer{
 		Name:     "ownfunc",
 		Doc:      "reports unexported package functions used exclusively by methods of a single receiver type",
@@ -78,7 +78,7 @@ func NewAnalyzer(cfg Config) *analysis.Analyzer {
 // ErrInvalid is invalid.
 var ErrInvalid = errors.New("invalid")
 
-func (cfg *Config) run(pass *analysis.Pass) (any, error) {
+func (cfg *Ownfunc) run(pass *analysis.Pass) (any, error) {
 	candidates := cfg.candidates(pass)
 	if len(candidates) == 0 {
 		return nil, nil
@@ -91,7 +91,7 @@ func (cfg *Config) run(pass *analysis.Pass) (any, error) {
 	return nil, nil
 }
 
-func (cfg *Config) report(candidates map[*types.Func]*candidate, pass *analysis.Pass) {
+func (cfg *Ownfunc) report(candidates map[*types.Func]*candidate, pass *analysis.Pass) {
 	for _, cand := range candidates {
 		if cand.disqualify || cand.calls < cfg.MinCalls || cand.owner == nil {
 			continue
@@ -115,7 +115,7 @@ func (cfg *Config) report(candidates map[*types.Func]*candidate, pass *analysis.
 	}
 }
 
-func (cfg *Config) candidates(pass *analysis.Pass) map[*types.Func]*candidate {
+func (cfg *Ownfunc) candidates(pass *analysis.Pass) map[*types.Func]*candidate {
 	candidates := make(map[*types.Func]*candidate)
 	ignoredRegexes := cfg.compileRegexes(cfg.IgnoredFunctions)
 	for _, file := range pass.Files {
@@ -144,7 +144,7 @@ func (cfg *Config) candidates(pass *analysis.Pass) map[*types.Func]*candidate {
 	return candidates
 }
 
-func (cfg *Config) ignoreFile(pass *analysis.Pass, pos token.Pos) bool {
+func (cfg *Ownfunc) ignoreFile(pass *analysis.Pass, pos token.Pos) bool {
 	if !cfg.IgnoreTestFilesEnabled() {
 		return false
 	}
@@ -152,7 +152,7 @@ func (cfg *Config) ignoreFile(pass *analysis.Pass, pos token.Pos) bool {
 	return strings.HasSuffix(filename, "_test.go")
 }
 
-func (cfg *Config) inspect(pass *analysis.Pass, candidates map[*types.Func]*candidate) error {
+func (cfg *Ownfunc) inspect(pass *analysis.Pass, candidates map[*types.Func]*candidate) error {
 	insp, ok := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 	if !ok {
 		return fmt.Errorf("%w: expected *inspector.Inspector", ErrInvalid)
@@ -189,7 +189,7 @@ func (cfg *Config) inspect(pass *analysis.Pass, candidates map[*types.Func]*cand
 	return nil
 }
 
-func (cfg *Config) inspectIdent(
+func (cfg *Ownfunc) inspectIdent(
 	pass *analysis.Pass,
 	node *ast.Ident,
 	stack []ast.Node,
@@ -215,7 +215,7 @@ func (cfg *Config) inspectIdent(
 	return true
 }
 
-func (cfg *Config) inspectCallExpr(
+func (cfg *Ownfunc) inspectCallExpr(
 	pass *analysis.Pass,
 	node *ast.CallExpr,
 	enclosing []*ast.FuncDecl,
@@ -267,7 +267,7 @@ func (cfg *Config) inspectCallExpr(
 // suggested fix. A blank/unnamed caller receiver is recorded rather than
 // rejected outright, since it only matters when the fix ends up needing a
 // synthesized receiver (see findPromotedParam).
-func (cfg *Config) recordCallSite(
+func (cfg *Ownfunc) recordCallSite(
 	pass *analysis.Pass,
 	caller *ast.FuncDecl,
 	ident *ast.Ident,
@@ -295,7 +295,7 @@ func (cfg *Config) recordCallSite(
 	})
 }
 
-func (cfg *Config) qualifiedOwner(pass *analysis.Pass,
+func (cfg *Ownfunc) qualifiedOwner(pass *analysis.Pass,
 	caller *ast.FuncDecl, cand *candidate) (*types.Named, bool) {
 	owner := cfg.canonicalReceiverType(pass, caller)
 	if owner == nil || cfg.isIgnoredReceiver(owner, cfg.IgnoredReceiverTypes) {
@@ -307,7 +307,7 @@ func (cfg *Config) qualifiedOwner(pass *analysis.Pass,
 
 // receiverName returns fn's receiver identifier, or "" when the receiver is
 // unnamed or blank, in which case no call site can be rewritten to a method call.
-func (cfg *Config) receiverName(fn *ast.FuncDecl) string {
+func (cfg *Ownfunc) receiverName(fn *ast.FuncDecl) string {
 	if fn == nil || fn.Recv == nil || len(fn.Recv.List) == 0 || len(fn.Recv.List[0].Names) == 0 {
 		return ""
 	}
@@ -653,7 +653,7 @@ func (cand *candidate) exprNeedsOwnerConversion(pass *analysis.Pass, expr ast.Ex
 // an explicit, singly-named parameter; such a parameter is a receiver in
 // disguise and should become one instead of decl gaining a receiver of its
 // own alongside it.
-func (cfg *Config) findPromotedParam(pass *analysis.Pass, cand *candidate) *promotedParam {
+func (cfg *Ownfunc) findPromotedParam(pass *analysis.Pass, cand *candidate) *promotedParam {
 	if cand.decl.Type.Params == nil {
 		return nil
 	}
@@ -675,7 +675,7 @@ func (cfg *Config) findPromotedParam(pass *analysis.Pass, cand *candidate) *prom
 // be exactly the type argument owner is instantiated with here (see
 // matchGenericOwnerParam), since a Go method cannot declare type parameters
 // of its own.
-func (cfg *Config) matchOwnerParam(
+func (cfg *Ownfunc) matchOwnerParam(
 	pass *analysis.Pass,
 	cand *candidate,
 	field *ast.Field,
@@ -714,7 +714,7 @@ func (cfg *Config) matchOwnerParam(
 // local variable calls it — so every site needing the conversion is checked
 // first (see canConvertAllSites). Only owner being generic (a receiver clause
 // can't bind a type parameter here) also rules this out.
-func (cfg *Config) matchUnderlyingOwnerParam(
+func (cfg *Ownfunc) matchUnderlyingOwnerParam(
 	pass *analysis.Pass,
 	cand *candidate,
 	field *ast.Field,
@@ -775,7 +775,7 @@ func (cand *candidate) ownerNameShadowed(pass *analysis.Pass, pos token.Pos) boo
 // field's type argument for owner is that same type parameter, since a
 // method cannot declare type parameters of its own — anything left over
 // after binding one to the receiver could not be expressed.
-func (cfg *Config) matchGenericOwnerParam(
+func (cfg *Ownfunc) matchGenericOwnerParam(
 	pass *analysis.Pass,
 	cand *candidate,
 	named *types.Named,
@@ -807,7 +807,7 @@ func (cfg *Config) matchGenericOwnerParam(
 // is unambiguous: every occurrence of field's own name inside decl must
 // resolve to field itself, and the established name must not already be
 // used by anything else in decl.
-func (cfg *Config) newPromotedParam(
+func (cfg *Ownfunc) newPromotedParam(
 	pass *analysis.Pass,
 	cand *candidate,
 	field *ast.Field,
@@ -838,7 +838,7 @@ func (cfg *Config) newPromotedParam(
 // establishedReceiverName returns the most common receiver name across
 // owner's existing methods (ties broken by first occurrence), or "" when no
 // method has a named, non-blank receiver.
-func (cfg *Config) establishedReceiverName(cand *candidate) string {
+func (cfg *Ownfunc) establishedReceiverName(cand *candidate) string {
 	counts := make(map[string]int)
 	var order []string
 	for i := range cand.owner.NumMethods() {
@@ -861,7 +861,7 @@ func (cfg *Config) establishedReceiverName(cand *candidate) string {
 }
 
 // identsOfObject collects every *ast.Ident inside decl that resolves to obj.
-func (cfg *Config) identsOfObject(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object) []*ast.Ident {
+func (cfg *Ownfunc) identsOfObject(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object) []*ast.Ident {
 	var idents []*ast.Ident
 	ast.Inspect(decl, func(n ast.Node) bool {
 		if ident, ok := n.(*ast.Ident); ok && pass.TypesInfo.Uses[ident] == obj {
@@ -875,7 +875,7 @@ func (cfg *Config) identsOfObject(pass *analysis.Pass, decl *ast.FuncDecl, obj t
 // identsCollide reports whether decl already declares or uses some object
 // named name other than obj, which would make renaming obj's occurrences to
 // name unsafe (shadowing or reassigning an unrelated identifier).
-func (cfg *Config) identsCollide(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object, name string) bool {
+func (cfg *Ownfunc) identsCollide(pass *analysis.Pass, decl *ast.FuncDecl, obj types.Object, name string) bool {
 	collides := false
 	ast.Inspect(decl, func(n ast.Node) bool {
 		ident, ok := n.(*ast.Ident)
@@ -892,7 +892,7 @@ func (cfg *Config) identsCollide(pass *analysis.Pass, decl *ast.FuncDecl, obj ty
 	return collides
 }
 
-func (cfg *Config) extractCalleeIdent(expr ast.Expr) *ast.Ident {
+func (cfg *Ownfunc) extractCalleeIdent(expr ast.Expr) *ast.Ident {
 	switch e := expr.(type) {
 	case *ast.Ident:
 		return e
@@ -903,7 +903,7 @@ func (cfg *Config) extractCalleeIdent(expr ast.Expr) *ast.Ident {
 	}
 }
 
-func (cfg *Config) canonicalReceiverType(pass *analysis.Pass, fn *ast.FuncDecl) *types.Named {
+func (cfg *Ownfunc) canonicalReceiverType(pass *analysis.Pass, fn *ast.FuncDecl) *types.Named {
 	if fn == nil || fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return nil
 	}
@@ -923,7 +923,7 @@ func (cfg *Config) canonicalReceiverType(pass *analysis.Pass, fn *ast.FuncDecl) 
 
 // isDirectCallee reports whether ident is the callee of an enclosing CallExpr,
 // walking through intervening parentheses.
-func (cfg *Config) isDirectCallee(ident *ast.Ident, stack []ast.Node) bool {
+func (cfg *Ownfunc) isDirectCallee(ident *ast.Ident, stack []ast.Node) bool {
 	for i := len(stack) - 2; i >= 0; i-- {
 		switch n := stack[i].(type) {
 		case *ast.ParenExpr:
@@ -937,7 +937,7 @@ func (cfg *Config) isDirectCallee(ident *ast.Ident, stack []ast.Node) bool {
 	return false
 }
 
-func (cfg *Config) isIgnoredReceiver(named *types.Named, ignored []string) bool {
+func (cfg *Ownfunc) isIgnoredReceiver(named *types.Named, ignored []string) bool {
 	if named == nil || named.Obj() == nil {
 		return false
 	}
@@ -950,11 +950,11 @@ func (cfg *Config) isIgnoredReceiver(named *types.Named, ignored []string) bool 
 // methods of a generic type each declare their own type-parameter objects
 // in their receiver clause (e.g. "Box[T]" vs "Box[U]"), so types.Identical
 // reports those receivers as different even though they name the same type.
-func (cfg *Config) sameNamedType(a, b *types.Named) bool {
+func (cfg *Ownfunc) sameNamedType(a, b *types.Named) bool {
 	return a.Obj() == b.Obj()
 }
 
-func (cfg *Config) compileRegexes(patterns []string) []*regexp.Regexp {
+func (cfg *Ownfunc) compileRegexes(patterns []string) []*regexp.Regexp {
 	var result []*regexp.Regexp
 	for _, p := range patterns {
 		if re, err := regexp.Compile(p); err == nil {
@@ -964,7 +964,7 @@ func (cfg *Config) compileRegexes(patterns []string) []*regexp.Regexp {
 	return result
 }
 
-func (cfg *Config) matchesAny(name string, regexes []*regexp.Regexp) bool {
+func (cfg *Ownfunc) matchesAny(name string, regexes []*regexp.Regexp) bool {
 	for _, re := range regexes {
 		if re.MatchString(name) {
 			return true

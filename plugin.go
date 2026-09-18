@@ -21,11 +21,11 @@ func New(conf any) (register.LinterPlugin, error) {
 	if ok {
 		conf = normalizeKeys(mconf)
 	}
-	cfg, err := register.DecodeSettings[Config](conf)
+	cfg, err := register.DecodeSettings[Ownfunc](conf)
 	if err != nil {
 		return nil, err
 	}
-	cfg.ApplyDefaults()
+	cfg.applyDefaults()
 	return &plugin{config: cfg}, nil
 }
 
@@ -41,13 +41,13 @@ func normalizeKeys(mconf map[string]any) map[string]any {
 }
 
 type plugin struct {
-	config Config
+	config Ownfunc
 }
 
 var _ register.LinterPlugin = (*plugin)(nil)
 
 func (p *plugin) BuildAnalyzers() ([]*analysis.Analyzer, error) {
-	return []*analysis.Analyzer{NewAnalyzer(p.config)}, nil
+	return []*analysis.Analyzer{p.config.Analyzer()}, nil
 }
 
 func (p *plugin) GetLoadMode() string {

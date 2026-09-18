@@ -11,7 +11,6 @@ import (
 )
 
 func main() {
-	cfg := ownfunc.Config{}
-	cfg.ApplyDefaults()
-	singlechecker.Main(ownfunc.NewAnalyzer(cfg))
+	cfg := ownfunc.Ownfunc{}
+	singlechecker.Main(cfg.Analyzer())
 }

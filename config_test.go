@@ -8,8 +8,8 @@ import "testing"
 func TestApplyDefaults(t *testing.T) {
 	t.Parallel()
 
-	var cfg Config
-	cfg.ApplyDefaults()
+	var cfg Ownfunc
+	cfg.applyDefaults()
 
 	if cfg.MinCalls != 1 {
 		t.Fatalf("MinCalls default = %d, want 1", cfg.MinCalls)
@@ -26,12 +26,12 @@ func TestApplyDefaultsPreservesExplicitFalse(t *testing.T) {
 	t.Parallel()
 
 	f := false
-	cfg := Config{
+	cfg := Ownfunc{
 		MinCalls:         3,
 		IgnoreTestFiles:  &f,
 		IgnoredFunctions: []string{"^setup$"},
 	}
-	cfg.ApplyDefaults()
+	cfg.applyDefaults()
 
 	if cfg.MinCalls != 3 {
 		t.Fatalf("MinCalls = %d, want 3", cfg.MinCalls)
