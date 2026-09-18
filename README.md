@@ -1,29 +1,24 @@
 # go-ownfunc
 
-`go-ownfunc` is a [`golangci-lint` custom linter](https://golangci-lint.run/plugins/module-plugins/) that reports unexported package-level functions whose direct calls all come from methods of one named type. Such a function often belongs on that type as an unexported method instead.
-
-```go
-func clearMap(m map[string]string) {
-	clear(m)
-}
-
-func (c *Cache) Invalidate() { clearMap(c.data) }
-func (c *Cache) Reset()      { clearMap(c.data) }
+`ownfunc` is [`golang.org/x/tools/go/analysis` tool](https://pkg.go.dev/golang.org/x/tools/go/analysis)  that reports unexported package-level functions whose direct calls all come from methods of one named type. Such a function often belongs on that type as an unexported method instead. Ships as [`golangci-lint` custom linter](https://golangci-lint.run/plugins/module-plugins/) and standalone binary:
+```diff
+-func clearMap(m map[string]string) {
++func (c *Cache) clearMap(m map[string]string) {
+ 	clear(m)
+ }
+ 
+-func (c *Cache) Invalidate() { clearMap(c.data) }
+-func (c *Cache) Reset()      { clearMap(c.data) }
++func (c *Cache) Invalidate() { c.clearMap(c.data) }
++func (c *Cache) Reset()      { c.clearMap(c.data) } 
 ```
-
-The linter reports `clearMap` as a candidate for an unexported `Cache` method. The standalone analyzer can also provide a suggested fix when it can safely rewrite every affected call.
-
 ## What it checks
 
-`ownfunc` considers unexported, package-level functions. It reports one only when all relevant direct calls are from methods of the same named receiver type; pointer and value receivers of that type count as the same owner.
-
-It does not report functions that are called from a free function, used by methods of different receiver types, exported, or ignored by configuration. By default, taking a candidate as a function value also disqualifies it.
-
-Suggested fixes convert the function into a method and qualify call sites. They handle recursive calls and calls in test files. A diagnostic remains available when the linter cannot safely produce a complete rewrite, such as a method with an unnamed receiver.
+`ownfunc` considers unexported, package-level functions. It reports one only when all relevant direct calls are from methods of the same named receiver type; pointer and value receivers of that type count as the same owner. It does not report functions that are called from a free function, used by methods of different receiver types, exported, or ignored by configuration. By default, taking a candidate as a function value also disqualifies it. Suggested fixes convert the function into a method and qualify call sites. They handle recursive calls and calls in test files. A diagnostic remains available when the linter cannot safely produce a complete rewrite, such as a method with an unnamed receiver.
 
 ## Use with golangci-lint
 
-Build a custom `golangci-lint` binary that includes the module. The plugin build configuration must use the same `golangci-lint` version as the binary.
+Currently you have to build a custom `golangci-lint` binary that includes the module. The plugin build configuration must use the same `golangci-lint` version as the binary.
 
 ```yaml
 # .custom-gcl.yml
@@ -72,12 +67,30 @@ Both kebab-case and snake_case setting names are accepted.
 | `ignored-functions` | `['^init$']` | Regular expressions matched against candidate function names. An empty list uses the default. |
 | `ignored-receiver-types` | `[]` | Named receiver types whose method calls should not establish ownership. |
 
-## Standalone analyzer
-
-Run the analyzer directly against packages while developing or testing it. Add `-fix` to apply its suggested fixes; this is intentionally the only supported autofix path, because golangci-lint cannot safely apply the linter's edits across a package and its test variant.
-
+## Standalone
 ```bash
-go run ./cmd/go-ownfunc ./...
+$ go install github.com/nfx/go-ownfunc/cmd/ownfunc@latest
+
+$ ownfunc
+ownfunc: reports unexported package functions used exclusively by methods of a single receiver type
+
+Usage: ownfunc [-flag] [package]
+
+
+Flags:
+  -V    print version and exit
+  -c int
+        display offending line with this many lines of context (default -1)
+  -diff
+        with -fix, don't update the files, but print a unified diff
+  -fix
+        apply all suggested fixes
+  -flags
+        print analyzer flags in JSON
+  -json
+        emit JSON output
+  -test
+        indicates whether test files should be analyzed, too (default true)
 ```
 
-The standalone command uses the default configuration. Use the `golangci-lint` plugin to configure the analyzer.
+The standalone command uses the default configuration. Use the [`golangci-lint` plugin](#use-with-golangci-lint) to configure the analyzer.
