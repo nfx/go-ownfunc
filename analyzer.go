@@ -108,7 +108,7 @@ func (cfg *Config) report(candidates map[*types.Func]*candidate, pass *analysis.
 		}
 		if !cand.unfixable {
 			diag.SuggestedFixes = []analysis.SuggestedFix{
-				cand.suggestedFix(promoted),
+				cand.suggestedFix(pass, promoted),
 			}
 		}
 		pass.Report(diag)
@@ -369,9 +369,9 @@ func (cand *candidate) receiverNameCollides(name string) bool {
 // promoted is set and that parameter becomes the receiver instead of a
 // synthesized one (see suggestedFixPromoted); otherwise a fresh receiver is
 // added (see suggestedFixReceiver).
-func (cand *candidate) suggestedFix(promoted *promotedParam) analysis.SuggestedFix {
+func (cand *candidate) suggestedFix(pass *analysis.Pass, promoted *promotedParam) analysis.SuggestedFix {
 	if promoted != nil {
-		return cand.suggestedFixPromoted(promoted)
+		return cand.suggestedFixPromoted(pass, promoted)
 	}
 	return cand.suggestedFixReceiver()
 }
@@ -497,7 +497,7 @@ func (cand *candidate) ownerUsesPointerReceiver() bool {
 // is generic, promoted.typeParam also moves from decl's own type-parameter
 // list into the receiver's, since a method cannot declare type parameters
 // itself.
-func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.SuggestedFix {
+func (cand *candidate) suggestedFixPromoted(pass *analysis.Pass, promoted *promotedParam) analysis.SuggestedFix {
 	name := promoted.receiverName
 	star := ""
 	if promoted.pointer {
@@ -514,13 +514,13 @@ func (cand *candidate) suggestedFixPromoted(promoted *promotedParam) analysis.Su
 		edits = append(edits, analysis.TextEdit{Pos: ident.Pos(), End: ident.End(), NewText: []byte(name)})
 	}
 	for _, site := range cand.sites {
-		edits = append(edits, cand.promotedCallEdits(site.ident, site.call, promoted)...)
+		edits = append(edits, cand.promotedCallEdits(pass, site.ident, site.call, promoted)...)
 	}
 	for _, site := range cand.recursiveCalls {
-		edits = append(edits, cand.promotedCallEdits(site.ident, site.call, promoted)...)
+		edits = append(edits, cand.promotedCallEdits(pass, site.ident, site.call, promoted)...)
 	}
 	for _, site := range cand.testCalls {
-		edits = append(edits, cand.promotedCallEdits(site.ident, site.call, promoted)...)
+		edits = append(edits, cand.promotedCallEdits(pass, site.ident, site.call, promoted)...)
 	}
 	slices.SortFunc(edits, func(left, right analysis.TextEdit) int {
 		return cmp.Compare(left.Pos, right.Pos)
@@ -566,6 +566,7 @@ func (cand *candidate) removeParamEdit(promoted *promotedParam) analysis.TextEdi
 // receiver expression, prefixed at ident, and the argument itself is dropped
 // from the call.
 func (cand *candidate) promotedCallEdits(
+	pass *analysis.Pass,
 	ident *ast.Ident,
 	call *ast.CallExpr,
 	promoted *promotedParam,
@@ -577,7 +578,7 @@ func (cand *candidate) promotedCallEdits(
 	edits := []analysis.TextEdit{{
 		Pos:     ident.Pos(),
 		End:     ident.Pos(),
-		NewText: []byte(cand.receiverExprText(arg) + "."),
+		NewText: []byte(cand.receiverExprText(pass, arg, promoted.pointer) + "."),
 	}}
 	pos, end := arg.Pos(), arg.End()
 	switch {
@@ -604,16 +605,48 @@ func (cand *candidate) exprText(expr ast.Expr) string {
 }
 
 // receiverExprText renders expr for use immediately before a selector, e.g.
-// "recv.Method()". A bare identifier is left unparenthesized; anything else
-// (a composite literal, a unary "&x", a binary expression, ...) is wrapped in
-// parens, since ".Method()" binds to only a primary expression and something
-// like "&Some{}.Method()" would otherwise parse as "&(Some{}.Method())".
-func (cand *candidate) receiverExprText(expr ast.Expr) string {
+// "recv.Method()". When expr's own static type isn't already owner (or
+// *owner, per pointer), it's wrapped in an explicit conversion first — needed
+// when the promoted parameter's declared type was only structurally
+// identical to owner rather than owner itself (see matchUnderlyingOwnerParam;
+// Go guarantees the conversion is valid, since expr was already assignable to
+// that structurally-identical declared type). Otherwise a bare identifier is
+// left unparenthesized; anything else (a composite literal, a unary "&x", a
+// binary expression, ...) is wrapped in parens, since ".Method()" binds to
+// only a primary expression and something like "&Some{}.Method()" would
+// otherwise parse as "&(Some{}.Method())".
+func (cand *candidate) receiverExprText(pass *analysis.Pass, expr ast.Expr, pointer bool) string {
 	text := cand.exprText(expr)
+	if cand.exprNeedsOwnerConversion(pass, expr, pointer) {
+		return cand.owner.Obj().Name() + "(" + text + ")"
+	}
 	if _, ok := expr.(*ast.Ident); ok {
 		return text
 	}
 	return "(" + text + ")"
+}
+
+// exprNeedsOwnerConversion reports whether expr's own static type isn't
+// already owner (or *owner, when pointer), meaning the promoted call site
+// must wrap it in an explicit conversion for the resulting method call to
+// type-check. It compares by declared-type identity (Obj()) rather than
+// types.Identical, since two of owner's own methods each declare their own
+// type-parameter objects in their receiver clause when owner is generic (see
+// sameNamedType), which types.Identical would otherwise see as different types.
+func (cand *candidate) exprNeedsOwnerConversion(pass *analysis.Pass, expr ast.Expr, pointer bool) bool {
+	t := pass.TypesInfo.TypeOf(expr)
+	if pointer {
+		ptr, ok := t.(*types.Pointer)
+		if !ok {
+			return true
+		}
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		return true
+	}
+	return named.Obj() != cand.owner.Obj()
 }
 
 // findPromotedParam reports whether decl already takes owner (or *owner) as
@@ -654,13 +687,87 @@ func (cfg *Config) matchOwnerParam(
 		t, pointer = ptr.Elem(), true
 	}
 	named, ok := t.(*types.Named)
-	if !ok || !cfg.sameNamedType(named, cand.owner) {
+	if !ok {
+		return cfg.matchUnderlyingOwnerParam(pass, cand, field, t, pointer, index)
+	}
+	if !cfg.sameNamedType(named, cand.owner) {
 		return nil
 	}
 	if cand.owner.TypeParams().Len() == 0 {
 		return cfg.newPromotedParam(pass, cand, field, pointer, index, nil)
 	}
 	return cfg.matchGenericOwnerParam(pass, cand, named, field, pointer, index)
+}
+
+// matchUnderlyingOwnerParam handles a field whose declared type, after any
+// pointer indirection, isn't itself a named type but is structurally
+// identical to owner's underlying type — the common idiom of declaring a
+// parameter as e.g. "bars []Bar" using the plain slice type instead of the
+// named bars type. Promotion is safe even though field's declared type is
+// looser than owner: whatever a caller passes there was already required by
+// the compiler to be assignable to that structurally-identical type, so it is
+// always convertible to owner too, and promotedCallEdits wraps it in that
+// conversion at each call site that needs it (see exprNeedsOwnerConversion).
+// That conversion syntax, "Owner(expr)", only compiles when owner's own name
+// isn't itself shadowed at the call site — which is common here, since the
+// parameter being promoted tends to already share owner's name with whatever
+// local variable calls it — so every site needing the conversion is checked
+// first (see canConvertAllSites). Only owner being generic (a receiver clause
+// can't bind a type parameter here) also rules this out.
+func (cfg *Config) matchUnderlyingOwnerParam(
+	pass *analysis.Pass,
+	cand *candidate,
+	field *ast.Field,
+	t types.Type,
+	pointer bool,
+	index int,
+) *promotedParam {
+	if pointer || cand.owner.TypeParams().Len() > 0 {
+		return nil
+	}
+	if !types.Identical(t, cand.owner.Underlying()) {
+		return nil
+	}
+	if !cand.canConvertAllSites(pass, index) {
+		return nil
+	}
+	return cfg.newPromotedParam(pass, cand, field, false, index, nil)
+}
+
+// canConvertAllSites reports whether every recorded call site — genuine,
+// recursive, and test — can safely be rewritten by promotedCallEdits: for
+// each site whose argument at index isn't already owner-typed,
+// exprNeedsOwnerConversion's "Owner(expr)" conversion syntax must actually
+// resolve to owner at that position, which it won't when owner's own name is
+// shadowed there (see ownerNameShadowed).
+func (cand *candidate) canConvertAllSites(pass *analysis.Pass, index int) bool {
+	for _, site := range slices.Concat(cand.sites, cand.recursiveCalls, cand.testCalls) {
+		if index >= len(site.call.Args) {
+			return false
+		}
+		arg := site.call.Args[index]
+		if !cand.exprNeedsOwnerConversion(pass, arg, false) {
+			continue
+		}
+		if cand.ownerNameShadowed(pass, arg.Pos()) {
+			return false
+		}
+	}
+	return true
+}
+
+// ownerNameShadowed reports whether owner's own name resolves to something
+// other than owner itself at pos — e.g. a local variable or parameter with
+// the same name — which would make an "Owner(expr)" conversion written at pos
+// resolve incorrectly, or fail to compile outright if the shadowing object
+// isn't callable.
+func (cand *candidate) ownerNameShadowed(pass *analysis.Pass, pos token.Pos) bool {
+	scope := pass.Pkg.Scope().Innermost(pos)
+	if scope == nil {
+		return false
+	}
+	_, obj := scope.LookupParent(cand.owner.Obj().Name(), pos)
+	return obj != cand.owner.Obj()
 }
 
 // matchGenericOwnerParam extends matchOwnerParam to a generic owner: the

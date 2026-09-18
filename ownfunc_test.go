@@ -156,6 +156,16 @@ func TestSuggestedFixesPromotedRename(t *testing.T) {
 	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixpromotedrename")
 }
 
+func TestSuggestedFixesPromotedUnderlying(t *testing.T) {
+	testdata := analysistest.TestData()
+
+	cfg := ownfunc.Config{}
+	cfg.ApplyDefaults()
+
+	analyzer := ownfunc.NewAnalyzer(cfg)
+	analysistest.RunWithSuggestedFixes(t, testdata, analyzer, "fixpromotedunderlying")
+}
+
 func TestSuggestedFixesNonStructOwner(t *testing.T) {
 	testdata := analysistest.TestData()
 
