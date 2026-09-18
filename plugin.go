@@ -47,7 +47,7 @@ type plugin struct {
 var _ register.LinterPlugin = (*plugin)(nil)
 
 func (p *plugin) BuildAnalyzers() ([]*analysis.Analyzer, error) {
-	return []*analysis.Analyzer{p.config.Analyzer()}, nil
+	return []*analysis.Analyzer{p.config.golangciAnalyzer()}, nil
 }
 
 func (p *plugin) GetLoadMode() string {

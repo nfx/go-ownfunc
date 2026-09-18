@@ -1,0 +1,17 @@
+package fixgolangci
+
+type Cache struct {
+	data map[string]string
+}
+
+func (c *Cache) clearMap(m map[string]string) { // want "clearMap is called only from methods of \\*Cache; consider making it an unexported method"
+	clear(m)
+}
+
+func (c *Cache) Invalidate() {
+	c.clearMap(c.data)
+}
+
+func (c *Cache) Reset() {
+	c.clearMap(c.data)
+}

@@ -11,7 +11,7 @@ func (c *Cache) Invalidate() { clearMap(c.data) }
 func (c *Cache) Reset()      { clearMap(c.data) }
 ```
 
-The linter reports `clearMap` as a candidate for an unexported `Cache` method. When it can safely rewrite every affected call, it also provides a suggested fix.
+The linter reports `clearMap` as a candidate for an unexported `Cache` method. The standalone analyzer can also provide a suggested fix when it can safely rewrite every affected call.
 
 ## What it checks
 
@@ -74,7 +74,7 @@ Both kebab-case and snake_case setting names are accepted.
 
 ## Standalone analyzer
 
-Run the analyzer directly against packages while developing or testing it:
+Run the analyzer directly against packages while developing or testing it. Add `-fix` to apply its suggested fixes; this is intentionally the only supported autofix path, because golangci-lint cannot safely apply the linter's edits across a package and its test variant.
 
 ```bash
 go run ./cmd/go-ownfunc ./...

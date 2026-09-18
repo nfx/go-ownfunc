@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -50,21 +51,41 @@ type promotedParam struct {
 	renameIdents []*ast.Ident
 }
 
+type suggestedFixMode int
+
+const (
+	suggestedFixesCombined suggestedFixMode = iota
+	suggestedFixesFileLocal
+)
+
 // Analyzer constructs the ownfunc analyzer with the given configuration.
 func (o *Ownfunc) Analyzer() *analysis.Analyzer {
+	return o.newAnalyzer(suggestedFixesCombined)
+}
+
+// golangciAnalyzer constructs suggested fixes that are scoped to the file of
+// their diagnostic. golangci-lint applies all edits from an issue to that one
+// file, so cross-file fixes must be reported separately.
+func (o *Ownfunc) golangciAnalyzer() *analysis.Analyzer {
+	return o.newAnalyzer(suggestedFixesFileLocal)
+}
+
+func (o *Ownfunc) newAnalyzer(fixMode suggestedFixMode) *analysis.Analyzer {
 	o.applyDefaults()
 	return &analysis.Analyzer{
 		Name:     "ownfunc",
 		Doc:      "reports unexported package functions used exclusively by methods of a single receiver type",
 		Requires: []*analysis.Analyzer{inspect.Analyzer},
-		Run:      o.run,
+		Run: func(pass *analysis.Pass) (any, error) {
+			return o.run(pass, fixMode)
+		},
 	}
 }
 
 // ErrInvalid is invalid.
 var ErrInvalid = errors.New("invalid")
 
-func (o *Ownfunc) run(pass *analysis.Pass) (any, error) {
+func (o *Ownfunc) run(pass *analysis.Pass, fixMode suggestedFixMode) (any, error) {
 	candidates := o.candidates(pass)
 	if len(candidates) == 0 {
 		return nil, nil
@@ -73,37 +94,77 @@ func (o *Ownfunc) run(pass *analysis.Pass) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	o.report(candidates, pass)
+	o.report(candidates, pass, fixMode)
 	return nil, nil
 }
 
-func (o *Ownfunc) report(candidates map[*types.Func]*candidate, pass *analysis.Pass) {
+func (o *Ownfunc) report(
+	candidates map[*types.Func]*candidate,
+	pass *analysis.Pass,
+	fixMode suggestedFixMode,
+) {
 	for _, cand := range candidates {
-		if cand.disqualify || cand.calls < o.MinCalls || cand.owner == nil {
-			continue
-		}
-		promoted := o.findPromotedParam(pass, cand)
-		if promoted == nil && o.skipCandidate(cand, pass) {
-			continue
-		}
-		if promoted == nil {
-			cand.resolveBlankReceivers(pass, o.establishedReceiverName(cand))
-		}
-		cand.unfixable = promoted == nil && cand.unfixableWithoutPromotion()
-		diag := analysis.Diagnostic{
-			Pos: cand.decl.Name.Pos(),
-			Message: fmt.Sprintf(
-				"%s is called only from methods of *%s; consider making it an unexported method",
-				cand.obj.Name(),
-				cand.owner.Obj().Name(),
-			),
-		}
-		if !cand.unfixable {
-			diag.SuggestedFixes = []analysis.SuggestedFix{
-				cand.suggestedFix(pass, promoted),
-			}
-		}
+		o.reportCandidate(cand, pass, fixMode)
+	}
+}
+
+func (o *Ownfunc) reportCandidate(cand *candidate, pass *analysis.Pass, fixMode suggestedFixMode) {
+	if cand.disqualify || cand.calls < o.MinCalls || cand.owner == nil {
+		return
+	}
+	promoted := o.findPromotedParam(pass, cand)
+	if promoted == nil && o.skipCandidate(cand, pass) {
+		return
+	}
+	if promoted == nil {
+		cand.resolveBlankReceivers(pass, o.establishedReceiverName(cand))
+	}
+	cand.unfixable = promoted == nil && cand.unfixableWithoutPromotion()
+	diag := analysis.Diagnostic{
+		Pos: cand.decl.Name.Pos(),
+		Message: fmt.Sprintf(
+			"%s is called only from methods of *%s; consider making it an unexported method",
+			cand.obj.Name(),
+			cand.owner.Obj().Name(),
+		),
+	}
+	if cand.unfixable {
 		pass.Report(diag)
+		return
+	}
+	if fixMode == suggestedFixesFileLocal {
+		o.reportFileLocalFixes(cand, pass, promoted, diag)
+		return
+	}
+	diag.SuggestedFixes = []analysis.SuggestedFix{cand.suggestedFix(pass, promoted)}
+	pass.Report(diag)
+}
+
+// reportFileLocalFixes emits one diagnostic per edited file so golangci-lint
+// applies every offset to its matching source file, including _test.go files.
+func (o *Ownfunc) reportFileLocalFixes(
+	cand *candidate,
+	pass *analysis.Pass,
+	promoted *promotedParam,
+	diag analysis.Diagnostic,
+) {
+	fix := cand.suggestedFix(pass, promoted)
+	fixes := make(map[string][]analysis.TextEdit)
+	for _, edit := range fix.TextEdits {
+		filename := pass.Fset.Position(edit.Pos).Filename
+		fixes[filename] = append(fixes[filename], edit)
+	}
+	filenames := slices.Collect(maps.Keys(fixes))
+	slices.Sort(filenames)
+	for _, filename := range filenames {
+		edits := fixes[filename]
+		fileDiag := diag
+		fileDiag.Pos = edits[0].Pos
+		fileDiag.SuggestedFixes = []analysis.SuggestedFix{{
+			Message:   fix.Message,
+			TextEdits: edits,
+		}}
+		pass.Report(fileDiag)
 	}
 }
 
