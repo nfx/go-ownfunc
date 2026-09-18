@@ -19,20 +19,20 @@ type Ownfunc struct {
 }
 
 // IgnoreTestFilesEnabled reports whether test files should be skipped.
-func (c *Ownfunc) IgnoreTestFilesEnabled() bool {
-	return c.IgnoreTestFiles != nil && *c.IgnoreTestFiles
+func (o *Ownfunc) IgnoreTestFilesEnabled() bool {
+	return o.IgnoreTestFiles != nil && *o.IgnoreTestFiles
 }
 
 // applyDefaults fills zero-value knobs with the documented defaults.
-func (c *Ownfunc) applyDefaults() {
-	if c.MinCalls <= 0 {
-		c.MinCalls = 1
+func (o *Ownfunc) applyDefaults() {
+	if o.MinCalls <= 0 {
+		o.MinCalls = 1
 	}
-	if c.IgnoreTestFiles == nil {
+	if o.IgnoreTestFiles == nil {
 		t := true
-		c.IgnoreTestFiles = &t
+		o.IgnoreTestFiles = &t
 	}
-	if len(c.IgnoredFunctions) == 0 {
-		c.IgnoredFunctions = []string{"^init$"}
+	if len(o.IgnoredFunctions) == 0 {
+		o.IgnoredFunctions = []string{"^init$"}
 	}
 }
